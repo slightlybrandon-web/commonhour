@@ -1,0 +1,1494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Commonhour — find a time that works</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" />
+<style>
+  html, body { margin: 0; padding: 0; background: #FFFFFF; }
+  #root { min-height: 100vh; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ============================================================
+     SETUP: paste your Supabase project URL and anon/publishable key.
+     See README.md for the setup SQL and deployment steps.
+     ============================================================ -->
+<script>
+  window.SUPABASE_URL = "https://egolqarcnfceemtqfeut.supabase.co";
+  window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVnb2xxYXJjbmZjZWVtdHFmZXV0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxOTE4NTUsImV4cCI6MjEwNDc2Nzg1NX0.t9rrxlQGbq5xSIFVc2p2Pl6UioAxGKCfLDIegQK6Zvs";
+
+  // Create a Stripe Payment Link (Stripe Dashboard > Payment Links, no code
+  // needed) for a flexible one-time "support us" amount, and paste the URL
+  // here. Leave as-is to hide the donate button until it's set.
+  window.DONATE_URL = "";
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/luxon@3/build/global/luxon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback, Fragment } = React;
+const { DateTime } = luxon;
+
+const NOT_CONFIGURED = !window.SUPABASE_URL || window.SUPABASE_URL.indexOf("PASTE_YOUR") === 0;
+let supabaseClient = null;
+if (!NOT_CONFIGURED) {
+  supabaseClient = supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storage: window.localStorage },
+  });
+}
+
+const COLORS = {
+  paper: "#FFFFFF",
+  paperRaised: "#F6F9F8",
+  ink: "#1C201F",
+  inkSoft: "#68716D",
+  line: "#E3E8E6",
+  lineSoft: "#EEF2F0",
+  brass: "#0E9F7A",
+  brassDeep: "#0B7C60",
+  danger: "#C0453A",
+  heat0: "#F6F9F8",
+  heat1: "#DCF2E9",
+  heat2: "#B7E5D5",
+  heat3: "#8CD3BC",
+  heat4: "#4FB89B",
+  heat5: "#0E9F7A",
+};
+
+const FALLBACK_TZS = [
+  "Pacific/Honolulu","America/Anchorage","America/Los_Angeles","America/Denver",
+  "America/Chicago","America/New_York","America/Sao_Paulo","UTC",
+  "Europe/London","Europe/Paris","Europe/Berlin","Europe/Athens","Europe/Moscow",
+  "Asia/Dubai","Asia/Kolkata","Asia/Bangkok","Asia/Shanghai","Asia/Tokyo",
+  "Asia/Seoul","Australia/Sydney","Pacific/Auckland",
+];
+
+function getAllTimezones() {
+  if (typeof Intl.supportedValuesOf === "function") {
+    try {
+      const list = Intl.supportedValuesOf("timeZone");
+      if (list && list.length) return list;
+    } catch (e) {}
+  }
+  return FALLBACK_TZS;
+}
+
+function detectViewerTz() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch (e) {
+    return "UTC";
+  }
+}
+
+function tzLabel(tz) {
+  try {
+    const offset = DateTime.now().setZone(tz).toFormat("ZZ");
+    return `${tz.replace(/_/g, " ")} (UTC${offset})`;
+  } catch (e) {
+    return tz;
+  }
+}
+
+function genCode() {
+  const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+
+function minutesToLabel(mins) {
+  const h24 = Math.floor(mins / 60);
+  const m = mins % 60;
+  const ampm = h24 >= 12 ? "PM" : "AM";
+  let h12 = h24 % 12;
+  if (h12 === 0) h12 = 12;
+  return m === 0 ? `${h12} ${ampm}` : `${h12}:${pad2(m)} ${ampm}`;
+}
+
+function dateLabel(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  const wd = d.toLocaleDateString(undefined, { weekday: "short" });
+  const md = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return { wd, md };
+}
+
+function slotKey(date, mins) { return `${date}_${mins}`; }
+
+const DURATION_OPTIONS = Array.from({ length: 12 }, (_, i) => (i + 1) * 30); // 30 min through 6 hours, every 30 min
+
+function durationLabel(mins) {
+  if (mins < 60) return `${mins} min`;
+  const hours = mins / 60;
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
+}
+
+function heatColor(ratio) {
+  if (ratio <= 0) return COLORS.heat0;
+  if (ratio <= 0.2) return COLORS.heat1;
+  if (ratio <= 0.4) return COLORS.heat2;
+  if (ratio <= 0.6) return COLORS.heat3;
+  if (ratio <= 0.8) return COLORS.heat4;
+  return COLORS.heat5;
+}
+
+function isValidEmail(s) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
+}
+
+// ---------------- timezone-aware time helpers ----------------
+
+function slotInstant(dateStr, minutes, zone) {
+  const hh = Math.floor(minutes / 60), mm = minutes % 60;
+  return DateTime.fromISO(`${dateStr}T${pad2(hh)}:${pad2(mm)}:00`, { zone });
+}
+
+// Row time labels, computed once against an anchor date and shared across
+// columns. This assumes a constant UTC offset between the two zones across
+// the whole plan, which is true except during the specific week a location
+// changes clocks for daylight saving — a rare edge case we accept here.
+function computeRowLabels(dates, slots, eventTz, displayTz) {
+  const anchor = dates[0];
+  return slots.map((m) => {
+    const orig = slotInstant(anchor, m, eventTz);
+    const conv = orig.setZone(displayTz);
+    const dayDiff = Math.round(
+      DateTime.fromISO(conv.toISODate()).diff(DateTime.fromISO(anchor), "days").days
+    );
+    const label = conv.toFormat(conv.minute === 0 ? "h a" : "h:mm a");
+    return { minutes: m, label, dayDiff };
+  });
+}
+
+function columnDateLabel(dateStr, slots, eventTz, displayTz) {
+  if (!slots.length) return dateLabel(dateStr);
+  const orig = slotInstant(dateStr, slots[0], eventTz);
+  const conv = orig.setZone(displayTz);
+  return dateLabel(conv.toISODate());
+}
+
+function toCalStamp(dt) {
+  return dt.toUTC().toFormat("yyyyLLdd'T'HHmmss'Z'");
+}
+
+function googleCalendarUrl(title, startDT, endDT, details, location, attendeeEmails) {
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: title,
+    dates: `${toCalStamp(startDT)}/${toCalStamp(endDT)}`,
+    details: details || "",
+    location: location || "",
+  });
+  if (attendeeEmails && attendeeEmails.length) params.set("add", attendeeEmails.join(","));
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+function outlookWebUrl(title, startDT, endDT, details, location, attendeeEmails) {
+  const params = new URLSearchParams({
+    subject: title,
+    startdt: startDT.toUTC().toISO(),
+    enddt: endDT.toUTC().toISO(),
+    body: details || "",
+    location: location || "",
+  });
+  if (attendeeEmails && attendeeEmails.length) params.set("to", attendeeEmails.join(";"));
+  return `https://outlook.office.com/calendar/0/deeplink/compose?${params.toString()}`;
+}
+
+function downloadICS(title, startDT, endDT, details, location, attendees, organizerName, organizerEmail) {
+  const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@timeblocked`;
+  const esc = (s) => String(s || "").replace(/[\n\r]+/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Commonhour//EN",
+    "METHOD:REQUEST",
+    "BEGIN:VEVENT",
+    `UID:${uid}`,
+    `DTSTAMP:${toCalStamp(DateTime.utc())}`,
+    `DTSTART:${toCalStamp(startDT)}`,
+    `DTEND:${toCalStamp(endDT)}`,
+    `SUMMARY:${esc(title)}`,
+  ];
+  if (location) lines.push(`LOCATION:${esc(location)}`);
+  if (details) lines.push(`DESCRIPTION:${esc(details)}`);
+  if (organizerEmail) {
+    lines.push(`ORGANIZER;CN=${esc(organizerName || organizerEmail)}:mailto:${organizerEmail}`);
+  }
+  (attendees || []).forEach(({ name, email }) => {
+    lines.push(`ATTENDEE;CN=${esc(name || email)};ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:${email}`);
+  });
+  lines.push("STATUS:CONFIRMED", "END:VEVENT", "END:VCALENDAR");
+  const blob = new Blob([lines.join("\r\n")], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${title.replace(/[^a-z0-9]/gi, "_") || "event"}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ---------------- Supabase data access ----------------
+
+async function dbCreateEvent(id, doc, userId) {
+  const { error } = await supabaseClient.from("events").insert({
+    id,
+    name: doc.name,
+    dates: doc.dates,
+    start_hour: doc.startMin,
+    end_hour: doc.endMin,
+    slot_min: doc.slotMin,
+    default_duration: doc.defaultDuration,
+    timezone: doc.timezone,
+    location: doc.location || null,
+    organizer_name: doc.organizerName || null,
+    organizer_email: doc.organizerEmail || null,
+    user_id: userId || null,
+  });
+  if (error) throw error;
+}
+
+async function dbGetEvent(id) {
+  const { data, error } = await supabaseClient.rpc("get_plan", { p_id: id });
+  if (error) throw error;
+  if (!data || !data.length) return null;
+  const row = data[0];
+  return {
+    name: row.name,
+    dates: row.dates,
+    startMin: row.start_hour,
+    endMin: row.end_hour,
+    slotMin: row.slot_min,
+    defaultDuration: row.default_duration,
+    timezone: row.timezone,
+    location: row.location,
+    organizerName: row.organizer_name,
+    userId: row.user_id,
+  };
+}
+
+// ---------------- Auth (Supabase magic link) ----------------
+
+async function sendMagicLink(email) {
+  const { error } = await supabaseClient.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: window.location.origin + window.location.pathname + window.location.search },
+  });
+  if (error) throw error;
+}
+
+async function signOut() {
+  await supabaseClient.auth.signOut();
+}
+
+// Plans this account created, plus plans this account has responded to
+// (matched by the account's own email) — the permanent, no-cost "for life"
+// history feature. RLS on the events table only allows an authenticated
+// user to see rows they created OR rows they've responded to, so a single
+// plain select already returns exactly the right set; we split it here by
+// checking which ones belong to this user_id.
+async function dbGetMyPolls(userId) {
+  const { data, error } = await supabaseClient
+    .from("events")
+    .select("id, name, created_at, user_id")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return {
+    created: (data || []).filter((r) => r.user_id === userId),
+    responded: (data || []).filter((r) => r.user_id !== userId),
+  };
+}
+
+// Returns true/false only — the organizer's email is never sent back to
+// the browser, even to the person who correctly guessed it.
+async function dbVerifyAdminEmail(id, email) {
+  if (!email) return false;
+  const { data, error } = await supabaseClient.rpc("verify_admin_email", { p_id: id, p_email: email.trim() });
+  if (error) return false;
+  return !!data;
+}
+
+const ADMIN_STORAGE_PREFIX = "tb_admin_";
+
+function getStoredAdmin(id) {
+  try {
+    const raw = localStorage.getItem(ADMIN_STORAGE_PREFIX + id);
+    if (!raw) return null;
+    return JSON.parse(raw); // { email }
+  } catch (e) {
+    return null;
+  }
+}
+
+function setStoredAdmin(id, email) {
+  try {
+    localStorage.setItem(ADMIN_STORAGE_PREFIX + id, JSON.stringify({ email }));
+  } catch (e) {}
+}
+
+
+async function dbGetAvailability(eventId) {
+  const { data, error } = await supabaseClient.rpc("get_plan_availability", { p_id: eventId });
+  if (error) throw error;
+  const out = {};
+  (data || []).forEach((row) => {
+    out[row.email] = { name: row.person_name, slots: row.slots || [] };
+  });
+  return out;
+}
+
+async function dbSaveAvailability(eventId, personName, email, slots) {
+  const { error } = await supabaseClient.rpc("save_availability", {
+    p_event_id: eventId,
+    p_name: personName,
+    p_email: email,
+    p_slots: slots,
+  });
+  if (error) throw error;
+}
+
+// ---------------- App ----------------
+
+function CommonhourApp() {
+  const [page, setPage] = useState("home");
+  const [joinCode, setJoinCode] = useState("");
+  const [joinError, setJoinError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const [session, setSession] = useState(null);
+  const [authPromptOpen, setAuthPromptOpen] = useState(false);
+  const [showSaveNudge, setShowSaveNudge] = useState(false);
+  const [showResponseNudge, setShowResponseNudge] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authState, setAuthState] = useState("idle"); // idle | sending | sent | error
+  const [authError, setAuthError] = useState("");
+  const [myPolls, setMyPolls] = useState(null);
+  const [dashboardError, setDashboardError] = useState("");
+
+  useEffect(() => {
+    if (!supabaseClient) return;
+    supabaseClient.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabaseClient.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  const currentUser = session ? session.user : null;
+
+  async function handleSendMagicLink() {
+    setAuthError("");
+    if (!isValidEmail(authEmail)) {
+      setAuthState("error");
+      setAuthError("Enter a valid email.");
+      return;
+    }
+    setAuthState("sending");
+    try {
+      await sendMagicLink(authEmail.trim());
+      setAuthState("sent");
+    } catch (e) {
+      setAuthState("error");
+      setAuthError((e && e.message) ? e.message : "Something went wrong sending the link.");
+    }
+  }
+
+  const [eventId, setEventId] = useState(null);
+  const [eventDoc, setEventDoc] = useState(null);
+  const [availDoc, setAvailDoc] = useState({});
+  const [loadError, setLoadError] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminEmail, setAdminEmail] = useState(null);
+  const [shareState, setShareState] = useState("idle");
+  const [adminPromptOpen, setAdminPromptOpen] = useState(false);
+  const [adminPromptEmail, setAdminPromptEmail] = useState("");
+  const [adminPromptError, setAdminPromptError] = useState("");
+  const [adminPromptBusy, setAdminPromptBusy] = useState(false);
+
+  const [personName, setPersonName] = useState("");
+  const [personEmail, setPersonEmail] = useState("");
+  const [nameConfirmed, setNameConfirmed] = useState(false);
+  const [confirmError, setConfirmError] = useState("");
+  const [activeTab, setActiveTab] = useState("mine");
+  const [selected, setSelected] = useState(new Set());
+  const [saveState, setSaveState] = useState("idle");
+  const [saveError, setSaveError] = useState("");
+  const [copyState, setCopyState] = useState("idle");
+  const [hoverInfo, setHoverInfo] = useState(null);
+  const [displayTz, setDisplayTz] = useState(detectViewerTz());
+
+  const [chosenSlot, setChosenSlot] = useState(null);
+  const [duration, setDuration] = useState(60);
+  const [excludedEmails, setExcludedEmails] = useState(new Set());
+
+  const dragRef = useRef({ active: false, mode: true });
+
+  const [formName, setFormName] = useState("");
+  const [formDates, setFormDates] = useState([]);
+  const [dateInput, setDateInput] = useState("");
+  const [startMin, setStartMin] = useState(9 * 60);
+  const [endMin, setEndMin] = useState(18 * 60);
+  const [formDuration, setFormDuration] = useState(60);
+  const [formTz, setFormTz] = useState(detectViewerTz());
+  const [formLocation, setFormLocation] = useState("");
+  const [formOrgName, setFormOrgName] = useState("");
+  const [formOrgEmail, setFormOrgEmail] = useState("");
+  const [createError, setCreateError] = useState("");
+
+  const allTzs = getAllTimezones();
+
+  useEffect(() => {
+    if (currentUser && currentUser.email && !formOrgEmail) {
+      setFormOrgEmail(currentUser.email);
+    }
+  }, [currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("event");
+    if (fromUrl) loadEvent(fromUrl.toUpperCase());
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const slots = eventDoc
+    ? (() => {
+        const arr = [];
+        for (let m = eventDoc.startMin; m < eventDoc.endMin; m += eventDoc.slotMin) {
+          arr.push(m);
+        }
+        return arr;
+      })()
+    : [];
+
+  const loadEvent = useCallback(async (id) => {
+    setLoadError("");
+    setBusy(true);
+    try {
+      const doc = await dbGetEvent(id);
+      if (!doc) {
+        setLoadError("We couldn't find a plan with that code.");
+        setBusy(false);
+        return false;
+      }
+      const avail = await dbGetAvailability(id);
+      let admin = false;
+      let confirmedEmail = null;
+      if (doc.userId && currentUser && currentUser.id === doc.userId) {
+        admin = true;
+        confirmedEmail = currentUser.email;
+      } else {
+        const stored = getStoredAdmin(id);
+        if (stored && stored.email) {
+          admin = await dbVerifyAdminEmail(id, stored.email);
+          if (admin) confirmedEmail = stored.email;
+        }
+      }
+      setEventDoc(doc);
+      setAvailDoc(avail);
+      setEventId(id);
+      setPage("event");
+      setIsAdmin(admin);
+      setAdminEmail(confirmedEmail);
+      if (admin) {
+        setPersonName(doc.organizerName || "");
+        setPersonEmail(confirmedEmail || "");
+        setNameConfirmed(!!(doc.organizerName && confirmedEmail));
+      } else {
+        setNameConfirmed(false);
+        setPersonName("");
+        setPersonEmail("");
+      }
+      setSelected(new Set());
+      setActiveTab("mine");
+      setShowSaveNudge(false);
+      setShowResponseNudge(false);
+      setDisplayTz(detectViewerTz());
+      window.history.replaceState({}, "", `?event=${id}`);
+      setBusy(false);
+      return true;
+    } catch (e) {
+      setLoadError("Something went wrong loading that plan. Try again.");
+      setBusy(false);
+      return false;
+    }
+  }, [currentUser]);
+
+  // Session can resolve asynchronously after the initial load, or the
+  // person can sign in while already viewing the plan — recheck either way.
+  useEffect(() => {
+    if (eventDoc && eventDoc.userId && currentUser && currentUser.id === eventDoc.userId && !isAdmin) {
+      setIsAdmin(true);
+      setAdminEmail(currentUser.email);
+      setPersonName(eventDoc.organizerName || "");
+      setPersonEmail(currentUser.email);
+      setNameConfirmed(!!eventDoc.organizerName);
+    }
+  }, [currentUser, eventDoc]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const refreshAvailability = useCallback(async () => {
+    if (!eventId) return;
+    try {
+      const avail = await dbGetAvailability(eventId);
+      setAvailDoc(avail);
+    } catch (e) {}
+  }, [eventId]);
+
+  useEffect(() => {
+    if (page === "event" && activeTab === "group") {
+      refreshAvailability();
+      const t = setInterval(refreshAvailability, 5000);
+      return () => clearInterval(t);
+    }
+  }, [page, activeTab, refreshAvailability]);
+
+  useEffect(() => {
+    if (eventDoc && personEmail && availDoc[personEmail]) {
+      setSelected(new Set(availDoc[personEmail].slots));
+    }
+  }, [eventDoc, personEmail]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (eventDoc) {
+      setDuration(eventDoc.defaultDuration || 60);
+      setChosenSlot(null);
+    }
+  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { setExcludedEmails(new Set()); }, [chosenSlot]);
+
+  function addDate(value) {
+    const v = value || dateInput;
+    if (!v) return;
+    if (formDates.includes(v)) { setDateInput(""); return; }
+    setFormDates([...formDates, v].sort());
+    setDateInput("");
+  }
+
+  function removeDate(d) { setFormDates(formDates.filter((x) => x !== d)); }
+
+  async function handleCreate() {
+    setCreateError("");
+    if (!formName.trim()) { setCreateError("Give your plan a name."); return; }
+    if (formDates.length === 0) { setCreateError("Add at least one date."); return; }
+    if (endMin <= startMin) { setCreateError("End time needs to be after the start time."); return; }
+    if (!formOrgName.trim()) { setCreateError("Add your name \u2014 you'll be listed as the organizer."); return; }
+    if (!isValidEmail(formOrgEmail)) { setCreateError("Add a valid email for yourself as the organizer."); return; }
+    setBusy(true);
+    const id = genCode();
+    const doc = {
+      name: formName.trim(),
+      dates: formDates,
+      startMin, endMin, slotMin: 30,
+      defaultDuration: formDuration,
+      timezone: formTz,
+      location: formLocation.trim(),
+      organizerName: formOrgName.trim(),
+      organizerEmail: formOrgEmail.trim(),
+      userId: currentUser ? currentUser.id : null,
+    };
+    try {
+      await dbCreateEvent(id, doc, doc.userId);
+      setEventDoc(doc);
+      setAvailDoc({});
+      setEventId(id);
+      setPage("event");
+      setActiveTab("mine");
+      setIsAdmin(true);
+      setAdminEmail(doc.organizerEmail);
+      setStoredAdmin(id, doc.organizerEmail);
+      setPersonName(doc.organizerName);
+      setPersonEmail(doc.organizerEmail);
+      setNameConfirmed(true);
+      setSelected(new Set());
+      setDisplayTz(detectViewerTz());
+      setShowSaveNudge(!currentUser);
+      window.history.replaceState({}, "", `?event=${id}`);
+    } catch (e) {
+      setCreateError("Couldn't create the plan. Try again.");
+    }
+    setBusy(false);
+  }
+
+  async function handleJoin() {
+    setJoinError("");
+    const code = joinCode.trim().toUpperCase();
+    if (!code) { setJoinError("Enter a plan code."); return; }
+    const ok = await loadEvent(code);
+    if (!ok) setJoinError("We couldn't find a plan with that code.");
+  }
+
+  async function shareEvent() {
+    const url = `${window.location.origin}${window.location.pathname}?event=${eventId}`;
+    const message = `Please choose your window of availability for our upcoming ${eventDoc.name}.`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: eventDoc.name, text: message, url });
+      } catch (e) {} // user cancelled share sheet — no error needed
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(`${message}\n${url}`);
+      setShareState("copied");
+      setTimeout(() => setShareState("idle"), 1800);
+    } catch (e) {
+      setShareState("manual");
+      setTimeout(() => setShareState("idle"), 2500);
+    }
+  }
+
+  async function confirmAdminEmail() {
+    setAdminPromptError("");
+    if (!isValidEmail(adminPromptEmail)) { setAdminPromptError("Enter a valid email."); return; }
+    setAdminPromptBusy(true);
+    const ok = await dbVerifyAdminEmail(eventId, adminPromptEmail);
+    setAdminPromptBusy(false);
+    if (!ok) { setAdminPromptError("That doesn't match the organizer's email for this plan."); return; }
+    setIsAdmin(true);
+    setAdminEmail(adminPromptEmail.trim());
+    setStoredAdmin(eventId, adminPromptEmail.trim());
+    setAdminPromptOpen(false);
+    setAdminPromptEmail("");
+    if (!personEmail) {
+      setPersonName(eventDoc.organizerName || "");
+      setPersonEmail(adminPromptEmail.trim());
+      setNameConfirmed(!!eventDoc.organizerName);
+    }
+  }
+
+  async function goDashboard() {
+    if (!currentUser) return;
+    setBusy(true);
+    setDashboardError("");
+    try {
+      const polls = await dbGetMyPolls(currentUser.id);
+      setMyPolls(polls);
+    } catch (e) {
+      setDashboardError((e && e.message) ? e.message : "Couldn't load your polls. Try again.");
+      setMyPolls({ created: [], responded: [] });
+    }
+    setPage("dashboard");
+    setBusy(false);
+  }
+
+  function goHome() {
+    setPage("home");
+    setEventId(null);
+    setEventDoc(null);
+    setAvailDoc({});
+    setJoinCode("");
+    setJoinError("");
+    setFormName("");
+    setFormDates([]);
+    setDateInput("");
+    setStartMin(9 * 60);
+    setEndMin(18 * 60);
+    setFormDuration(60);
+    setFormTz(detectViewerTz());
+    setFormLocation("");
+    setFormOrgName("");
+    setFormOrgEmail("");
+    setCreateError("");
+    setIsAdmin(false);
+    setAdminEmail(null);
+    setAdminPromptOpen(false);
+    setAdminPromptEmail("");
+    setAdminPromptError("");
+    setShowSaveNudge(false);
+    setShowResponseNudge(false);
+    window.history.replaceState({}, "", window.location.pathname);
+  }
+
+  function cellSelected(key) { return selected.has(key); }
+
+  function paintCell(key, mode) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (mode) next.add(key); else next.delete(key);
+      return next;
+    });
+  }
+
+  function onCellDown(key) {
+    const mode = !cellSelected(key);
+    dragRef.current = { active: true, mode };
+    paintCell(key, mode);
+  }
+
+  function onCellEnter(key) {
+    if (!dragRef.current.active) return;
+    paintCell(key, dragRef.current.mode);
+  }
+
+  function endDrag() { dragRef.current.active = false; }
+
+  function confirmIdentity() {
+    setConfirmError("");
+    if (!personName.trim()) { setConfirmError("Add your name."); return; }
+    if (!isValidEmail(personEmail)) { setConfirmError("Add a valid email address."); return; }
+    setNameConfirmed(true);
+  }
+
+  async function saveAvailability() {
+    setSaveState("saving");
+    setSaveError("");
+    try {
+      await dbSaveAvailability(eventId, personName.trim(), personEmail.trim(), Array.from(selected));
+      const avail = await dbGetAvailability(eventId);
+      setAvailDoc(avail);
+      setSaveState("saved");
+      if (!currentUser && !isAdmin) setShowResponseNudge(true);
+      setTimeout(() => setSaveState("idle"), 1800);
+    } catch (e) {
+      setSaveState("error");
+      if (e && e.message && e.message.indexOf("RESPONDENT_CAP_REACHED") !== -1) {
+        setSaveError("This plan has reached its response limit for a no-account plan. Ask the organizer to sign in and create an account for unlimited responses.");
+      } else {
+        setSaveError("Couldn't save. Try again.");
+      }
+      setTimeout(() => setSaveState("idle"), 4000);
+    }
+  }
+
+  async function copyLink() {
+    const url = `${window.location.origin}${window.location.pathname}?event=${eventId}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyState("copied");
+      setTimeout(() => setCopyState("idle"), 1500);
+    } catch (e) {
+      setCopyState("manual");
+      setTimeout(() => setCopyState("idle"), 2500);
+    }
+  }
+
+  const participantEmails = Object.keys(availDoc || {});
+  const totalParticipants = participantEmails.length;
+
+  function countAt(key) {
+    const people = [];
+    for (const email of participantEmails) {
+      const rec = availDoc[email];
+      if ((rec.slots || []).includes(key)) people.push({ name: rec.name, email });
+    }
+    return people;
+  }
+
+  function notFreeAt(key) {
+    const people = [];
+    for (const email of participantEmails) {
+      const rec = availDoc[email];
+      if (!(rec.slots || []).includes(key)) people.push({ name: rec.name, email });
+    }
+    return people;
+  }
+
+  const styles = {
+    root: { fontFamily: "'Inter', sans-serif", background: COLORS.paper, color: COLORS.ink, minHeight: "100vh", lineHeight: 1.5 },
+    shell: { maxWidth: 880, margin: "0 auto", padding: "40px 24px 64px" },
+    wordmark: { fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: 20, color: COLORS.ink, cursor: "pointer", display: "inline-block", marginBottom: 40 },
+    h1: { fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: "clamp(32px, 5vw, 44px)", lineHeight: 1.15, margin: "0 0 12px", maxWidth: 560 },
+    sub: { color: COLORS.inkSoft, fontSize: 16, maxWidth: 480, margin: "0 0 40px" },
+    label: { display: "block", fontSize: 13, color: COLORS.inkSoft, marginBottom: 6 },
+    hint: { fontSize: 12, color: COLORS.inkSoft, margin: "4px 0 0" },
+    input: { width: "100%", fontFamily: "inherit", fontSize: 15, padding: "10px 12px", background: COLORS.paperRaised, border: `1px solid ${COLORS.line}`, borderRadius: 4, color: COLORS.ink, outline: "none" },
+    button: { fontFamily: "inherit", fontSize: 15, padding: "11px 22px", background: COLORS.brass, color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 500 },
+    buttonGhost: { fontFamily: "inherit", fontSize: 14, padding: "9px 16px", background: "transparent", color: COLORS.ink, border: `1px solid ${COLORS.line}`, borderRadius: 4, cursor: "pointer" },
+    chip: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, padding: "5px 10px", background: COLORS.paperRaised, border: `1px solid ${COLORS.line}`, borderRadius: 999, marginRight: 8, marginBottom: 8 },
+    chipX: { cursor: "pointer", color: COLORS.inkSoft, fontWeight: 600 },
+    errorText: { color: COLORS.danger, fontSize: 13, marginTop: 8 },
+  };
+
+  if (NOT_CONFIGURED) {
+    return (
+      <div style={styles.root}>
+        <div style={styles.shell}>
+          <span style={styles.wordmark}>Commonhour</span>
+          <h1 style={{ ...styles.h1, fontSize: 26 }}>Almost there</h1>
+          <p style={{ ...styles.sub, maxWidth: 560 }}>
+            This site needs a Supabase project to store plans. Paste your project URL and key into
+            the <code>SUPABASE_URL</code> / <code>SUPABASE_ANON_KEY</code> variables near the top of
+            <code> index.html</code>. Full steps are in <code>README.md</code>.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (page === "home") {
+    return (
+      <div style={styles.root}>
+        <div style={styles.shell}>
+          <AuthHeader
+            currentUser={currentUser}
+            onHome={goHome}
+            onDashboard={goDashboard}
+            onSignOut={signOut}
+            authPromptOpen={authPromptOpen}
+            setAuthPromptOpen={setAuthPromptOpen}
+            authEmail={authEmail}
+            setAuthEmail={setAuthEmail}
+            authState={authState}
+            onSendMagicLink={handleSendMagicLink}
+            authError={authError}
+            styles={styles}
+          />
+          <h1 style={styles.h1}>Find the hour that works for everyone.</h1>
+          <p style={styles.sub}>
+            Lay out the dates and times you could meet. Share one link. Once you can see who's free
+            when, send the invite in two clicks — no separate email required.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${COLORS.line}`, borderRadius: 6, overflow: "hidden", background: COLORS.paperRaised }}>
+            <div style={{ padding: "28px 28px 32px", borderRight: `1px solid ${COLORS.line}` }}>
+              <h2 style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: 20, margin: "0 0 6px" }}>Start a new plan</h2>
+              <p style={{ color: COLORS.inkSoft, fontSize: 14, margin: "0 0 18px" }}>Pick your dates, time window, and time zone — you can add multiple dates at once.</p>
+              <button style={styles.button} onClick={() => setPage("create")}>Create a plan</button>
+            </div>
+            <div style={{ padding: "28px 28px 32px" }}>
+              <h2 style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: 20, margin: "0 0 6px" }}>Join a plan</h2>
+              <p style={{ color: COLORS.inkSoft, fontSize: 14, margin: "0 0 14px" }}>Enter the code someone shared with you.</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input style={{ ...styles.input, textTransform: "uppercase", letterSpacing: "0.06em" }} placeholder="ABC123" maxLength={6} value={joinCode} onChange={(e) => setJoinCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleJoin()} />
+                <button style={styles.buttonGhost} onClick={handleJoin} disabled={busy}>Join</button>
+              </div>
+              {joinError && <p style={styles.errorText}>{joinError}</p>}
+            </div>
+          </div>
+          <DonateAffiliateStrip isPaid={false} />
+        </div>
+      </div>
+    );
+  }
+
+  if (page === "dashboard") {
+    return (
+      <div style={styles.root}>
+        <div style={styles.shell}>
+          <AuthHeader
+            currentUser={currentUser}
+            onHome={goHome}
+            onDashboard={goDashboard}
+            onSignOut={signOut}
+            authPromptOpen={authPromptOpen}
+            setAuthPromptOpen={setAuthPromptOpen}
+            authEmail={authEmail}
+            setAuthEmail={setAuthEmail}
+            authState={authState}
+            onSendMagicLink={handleSendMagicLink}
+            authError={authError}
+            styles={styles}
+          />
+          <h1 style={{ ...styles.h1, fontSize: 28 }}>My polls</h1>
+          <p style={styles.sub}>Everything you've created or responded to, saved to your account.</p>
+          {busy && <p style={{ color: COLORS.inkSoft }}>Loading…</p>}
+          {dashboardError && <p style={styles.errorText}>{dashboardError}</p>}
+          {myPolls && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, maxWidth: 720 }}>
+              <div>
+                <h2 style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: 16, marginBottom: 10 }}>Created by you</h2>
+                {myPolls.created.length === 0 && <p style={{ fontSize: 13, color: COLORS.inkSoft }}>No plans yet.</p>}
+                {myPolls.created.map((p) => (
+                  <div key={p.id} onClick={() => loadEvent(p.id)} style={{ cursor: "pointer", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}`, fontSize: 14 }}>
+                    {p.name}
+                  </div>
+                ))}
+              </div>
+              <div>
+                <h2 style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: 16, marginBottom: 10 }}>You responded to</h2>
+                {myPolls.responded.length === 0 && <p style={{ fontSize: 13, color: COLORS.inkSoft }}>None yet.</p>}
+                {myPolls.responded.map((p) => (
+                  <div key={p.id} onClick={() => loadEvent(p.id)} style={{ cursor: "pointer", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}`, fontSize: 14 }}>
+                    {p.name}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <DonateAffiliateStrip isPaid={false} />
+        </div>
+      </div>
+    );
+  }
+
+  if (page === "create") {
+    const halfHourOptions = Array.from({ length: 48 }, (_, i) => i * 30);
+    return (
+      <div style={styles.root}>
+        <div style={styles.shell}>
+          <AuthHeader
+            currentUser={currentUser}
+            onHome={goHome}
+            onDashboard={goDashboard}
+            onSignOut={signOut}
+            authPromptOpen={authPromptOpen}
+            setAuthPromptOpen={setAuthPromptOpen}
+            authEmail={authEmail}
+            setAuthEmail={setAuthEmail}
+            authState={authState}
+            onSendMagicLink={handleSendMagicLink}
+            authError={authError}
+            styles={styles}
+          />
+          <h1 style={{ ...styles.h1, fontSize: 30 }}>Set up your plan</h1>
+          <p style={styles.sub}>Everything here is shown to invitees once they open the plan.</p>
+          <div style={{ maxWidth: 460 }}>
+            <div style={{ marginBottom: 20 }}>
+              <label style={styles.label}>Plan name</label>
+              <input style={styles.input} placeholder="Team retro, house hunting, birthday dinner…" value={formName} onChange={(e) => setFormName(e.target.value)} />
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <label style={styles.label}>Dates</label>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <input type="date" style={styles.input} value={dateInput} onChange={(e) => addDate(e.target.value)} />
+              </div>
+              <p style={styles.hint}>Add every date that could work — people will mark which ones they're actually free.</p>
+              <div style={{ marginTop: 8 }}>
+                {formDates.map((d) => {
+                  const { wd, md } = dateLabel(d);
+                  return (
+                    <span key={d} style={styles.chip}>{wd} {md}
+                      <span style={styles.chipX} onClick={() => removeDate(d)}>×</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 16, marginBottom: 8 }}>
+              <div style={{ flex: 1 }}>
+                <label style={styles.label}>Earliest time</label>
+                <select style={styles.input} value={startMin} onChange={(e) => setStartMin(Number(e.target.value))}>
+                  {halfHourOptions.map((m) => <option key={m} value={m}>{minutesToLabel(m)}</option>)}
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={styles.label}>Latest time</label>
+                <select style={styles.input} value={endMin} onChange={(e) => setEndMin(Number(e.target.value))}>
+                  {halfHourOptions.map((m) => <option key={m} value={m}>{minutesToLabel(m)}</option>)}
+                </select>
+              </div>
+            </div>
+            <p style={{ ...styles.hint, marginBottom: 20 }}>These times are in the time zone you pick below — each invitee will see them converted to their own.</p>
+
+            <div style={{ marginBottom: 20 }}>
+              <label style={styles.label}>How long is the actual event?</label>
+              <select style={{ ...styles.input, maxWidth: 220 }} value={formDuration} onChange={(e) => setFormDuration(Number(e.target.value))}>
+                {DURATION_OPTIONS.map((m) => <option key={m} value={m}>{durationLabel(m)}</option>)}
+              </select>
+              <p style={styles.hint}>Sets the default when booking a final time — can still be changed then.</p>
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <label style={styles.label}>Time zone</label>
+              <select style={styles.input} value={formTz} onChange={(e) => setFormTz(e.target.value)}>
+                {allTzs.map((tz) => <option key={tz} value={tz}>{tzLabel(tz)}</option>)}
+              </select>
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <label style={styles.label}>Location or meeting link</label>
+              <input style={styles.input} placeholder="Zoom / Meet / Teams link, or an address" value={formLocation} onChange={(e) => setFormLocation(e.target.value)} />
+              <p style={styles.hint}>Optional. Shown to everyone once a time is picked, and included on the calendar invite.</p>
+            </div>
+
+            <div style={{ marginBottom: 28 }}>
+              <label style={styles.label}>Your name and email</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input style={styles.input} placeholder="Your name" value={formOrgName} onChange={(e) => setFormOrgName(e.target.value)} />
+                <input style={styles.input} placeholder="you@example.com" value={formOrgEmail} onChange={(e) => setFormOrgEmail(e.target.value)} />
+              </div>
+              <p style={styles.hint}>You're the organizer — this carries over automatically and lets you finalize a time later.</p>
+            </div>
+
+            {createError && <p style={styles.errorText}>{createError}</p>}
+            <div style={{ display: "flex", gap: 12 }}>
+              <button style={styles.button} onClick={handleCreate} disabled={busy}>{busy ? "Creating…" : "Create plan"}</button>
+              <button style={styles.buttonGhost} onClick={goHome}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (page === "event" && eventDoc) {
+    const locationIsUrl = /^https?:\/\//i.test(eventDoc.location || "");
+    return (
+      <div style={styles.root} onMouseUp={endDrag} onTouchEnd={endDrag}>
+        <div style={styles.shell}>
+          <AuthHeader
+            currentUser={currentUser}
+            onHome={goHome}
+            onDashboard={goDashboard}
+            onSignOut={signOut}
+            authPromptOpen={authPromptOpen}
+            setAuthPromptOpen={setAuthPromptOpen}
+            authEmail={authEmail}
+            setAuthEmail={setAuthEmail}
+            authState={authState}
+            onSendMagicLink={handleSendMagicLink}
+            authError={authError}
+            styles={styles}
+          />
+
+          {showSaveNudge && !currentUser && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", border: `1px solid ${COLORS.brassDeep}`, borderRadius: 6, padding: "12px 16px", marginBottom: 20, background: COLORS.heat1 }}>
+              <span style={{ fontSize: 13, color: COLORS.ink }}>
+                Want to save this plan and come back to it later? Create a free account — no password, just your email.
+              </span>
+              <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+                <button
+                  style={{ ...styles.buttonGhost, padding: "6px 14px", fontSize: 13 }}
+                  onClick={() => { setAuthPromptOpen(true); setShowSaveNudge(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                >
+                  Create a free account / Sign in
+                </button>
+                <span onClick={() => setShowSaveNudge(false)} style={{ cursor: "pointer", color: COLORS.inkSoft, fontSize: 13, alignSelf: "center" }}>No thanks</span>
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginBottom: 8 }}>
+            <h1 style={{ ...styles.h1, fontSize: 28, marginBottom: 4 }}>{eventDoc.name}</h1>
+            <p style={{ color: COLORS.inkSoft, fontSize: 14, margin: 0 }}>
+              {totalParticipants === 0 ? "No one has added their availability yet." : `${totalParticipants} ${totalParticipants === 1 ? "person has" : "people have"} responded.`}
+            </p>
+          </div>
+
+          <div style={{ border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "12px 16px", marginBottom: 12, background: COLORS.paperRaised }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.ink, marginBottom: 2 }}>
+              Share this plan
+            </div>
+            <p style={{ fontSize: 12, color: COLORS.inkSoft, margin: "0 0 8px" }}>
+              Send this to your group so people can mark when they're free.
+            </p>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, letterSpacing: "0.08em", fontSize: 16 }}>{eventId}</span>
+              <span onClick={copyLink} style={{ cursor: "pointer", color: COLORS.brass, fontSize: 13 }}>
+                {copyState === "copied" ? "Link copied" : copyState === "manual" ? "Select & copy" : "Copy link"}
+              </span>
+              <span onClick={shareEvent} style={{ cursor: "pointer", color: COLORS.brass, fontSize: 13, borderLeft: `1px solid ${COLORS.line}`, paddingLeft: 8 }}>
+                {shareState === "copied" ? "Copied" : shareState === "manual" ? "Select & copy" : "Share"}
+              </span>
+            </div>
+          </div>
+
+          {isAdmin ? (
+            <p style={{ fontSize: 12, color: COLORS.inkSoft, marginBottom: 20 }}>
+              You're recognized as the organizer on this device — booking controls are unlocked below.
+            </p>
+          ) : (
+            <div style={{ marginBottom: 20 }}>
+              {!adminPromptOpen ? (
+                <span onClick={() => setAdminPromptOpen(true)} style={{ fontSize: 12, color: COLORS.inkSoft, cursor: "pointer", textDecoration: "underline" }}>
+                  Organizing this plan? Confirm your email to unlock booking.
+                </span>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <input
+                    style={{ ...styles.input, width: "auto", fontSize: 13, padding: "6px 10px" }}
+                    placeholder="you@example.com"
+                    value={adminPromptEmail}
+                    onChange={(e) => setAdminPromptEmail(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && confirmAdminEmail()}
+                  />
+                  <button style={{ ...styles.buttonGhost, padding: "6px 12px", fontSize: 13 }} onClick={confirmAdminEmail} disabled={adminPromptBusy}>
+                    {adminPromptBusy ? "Checking…" : "Confirm"}
+                  </button>
+                  <span onClick={() => { setAdminPromptOpen(false); setAdminPromptError(""); }} style={{ fontSize: 12, color: COLORS.inkSoft, cursor: "pointer" }}>Cancel</span>
+                  {adminPromptError && <span style={{ ...styles.errorText, marginTop: 0 }}>{adminPromptError}</span>}
+                </div>
+              )}
+            </div>
+          )}
+
+          {eventDoc.location && (
+            <p style={{ fontSize: 13, color: COLORS.inkSoft, marginTop: 0, marginBottom: 20 }}>
+              {locationIsUrl
+                ? <a href={eventDoc.location} target="_blank" rel="noreferrer" style={{ color: COLORS.brass }}>{eventDoc.location}</a>
+                : eventDoc.location}
+            </p>
+          )}
+
+          <div style={{ display: "flex", gap: 4, borderBottom: `1px solid ${COLORS.line}`, marginBottom: 16 }}>
+            {[{ id: "mine", label: "Your availability" }, { id: "group", label: "Group availability" }].map((t) => (
+              <div key={t.id} onClick={() => setActiveTab(t.id)} style={{ padding: "10px 4px", marginRight: 24, fontSize: 14, cursor: "pointer", color: activeTab === t.id ? COLORS.ink : COLORS.inkSoft, borderBottom: activeTab === t.id ? `2px solid ${COLORS.brass}` : "2px solid transparent", fontWeight: activeTab === t.id ? 500 : 400 }}>
+                {t.label}
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+            <label style={{ fontSize: 12, color: COLORS.inkSoft }}>Showing times in</label>
+            <select style={{ ...styles.input, width: "auto", padding: "6px 8px", fontSize: 13 }} value={displayTz} onChange={(e) => setDisplayTz(e.target.value)}>
+              <option value={detectViewerTz()}>Your time zone ({detectViewerTz().replace(/_/g, " ")})</option>
+              {displayTz !== eventDoc.timezone && (
+                <option value={eventDoc.timezone}>Plan's time zone ({eventDoc.timezone.replace(/_/g, " ")})</option>
+              )}
+              {allTzs.map((tz) => <option key={tz} value={tz}>{tzLabel(tz)}</option>)}
+            </select>
+          </div>
+
+          {activeTab === "mine" && !nameConfirmed && (
+            <div style={{ maxWidth: 420, marginBottom: 8 }}>
+              <label style={styles.label}>Your name and email</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input style={styles.input} placeholder="Your name" value={personName} onChange={(e) => setPersonName(e.target.value)} />
+                <input style={styles.input} placeholder="you@example.com" value={personEmail} onChange={(e) => setPersonEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirmIdentity()} />
+              </div>
+              <p style={styles.hint}>We'll use this to add you to the calendar invite once a time is picked.</p>
+              {confirmError && <p style={styles.errorText}>{confirmError}</p>}
+              <button style={{ ...styles.buttonGhost, marginTop: 10 }} onClick={confirmIdentity}>Continue</button>
+            </div>
+          )}
+
+          {activeTab === "mine" && nameConfirmed && (
+            <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <p style={{ fontSize: 14, color: COLORS.inkSoft, margin: 0 }}>
+                Marking availability as <strong style={{ color: COLORS.ink }}>{personName}</strong>. Click and drag across the grid to mark when you're free.
+              </p>
+              <span style={{ fontSize: 13, color: COLORS.brass, cursor: "pointer" }} onClick={() => setNameConfirmed(false)}>Change</span>
+            </div>
+          )}
+
+          {activeTab === "group" && (
+            <p style={{ fontSize: 14, color: COLORS.inkSoft, marginBottom: 12 }}>
+              Darker cells mean more people are free. Click a cell to see who's free and who isn't{isAdmin ? ", and to set up the invite." : "."}
+            </p>
+          )}
+
+          <div style={{ position: "relative" }}>
+            <ScheduleGrid
+              dates={eventDoc.dates}
+              slots={slots}
+              eventTz={eventDoc.timezone}
+              displayTz={displayTz}
+              mode={activeTab}
+              editable={activeTab === "mine" && nameConfirmed}
+              selected={selected}
+              onCellDown={onCellDown}
+              onCellEnter={onCellEnter}
+              countAt={countAt}
+              totalParticipants={totalParticipants}
+              hoverInfo={hoverInfo}
+              setHoverInfo={setHoverInfo}
+              chosenSlot={chosenSlot}
+              onCellClick={(date, m) => setChosenSlot({ date, m })}
+              locked={activeTab === "mine" && !nameConfirmed}
+              notFreeAt={notFreeAt}
+            />
+            {activeTab === "mine" && !nameConfirmed && (
+              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                <span style={{ background: COLORS.paper, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "8px 14px", fontSize: 13, color: COLORS.inkSoft }}>
+                  Enter your name and email above to unlock the grid
+                </span>
+              </div>
+            )}
+          </div>
+
+          {activeTab === "group" && chosenSlot && (() => {
+            const key = slotKey(chosenSlot.date, chosenSlot.m);
+            const people = countAt(key);
+            const absent = notFreeAt(key);
+            const included = people.filter((p) => !excludedEmails.has(p.email));
+            const startDT = slotInstant(chosenSlot.date, chosenSlot.m, eventDoc.timezone);
+            const endDT = startDT.plus({ minutes: duration });
+            const localStart = startDT.setZone(displayTz);
+            const { wd, md } = dateLabel(localStart.toISODate());
+            const details = `Scheduled with Commonhour.` + (included.length ? ` Confirmed free: ${included.map((p) => p.name).join(", ")}.` : "");
+            const attendeeEmails = included.map((p) => p.email);
+
+            return (
+              <div style={{ marginTop: 20, padding: 20, border: `1px solid ${COLORS.line}`, borderRadius: 6, background: COLORS.paperRaised, maxWidth: 480 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontSize: 12, color: COLORS.inkSoft, marginBottom: 4 }}>Selected time</div>
+                    <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 20, fontWeight: 700 }}>
+                      {wd} {md} · {localStart.toFormat(localStart.minute === 0 ? "h a" : "h:mm a")}
+                    </div>
+                    <div style={{ fontSize: 13, color: COLORS.inkSoft, marginTop: 4 }}>{people.length} of {totalParticipants || 0} free</div>
+                  </div>
+                  <span onClick={() => setChosenSlot(null)} style={{ cursor: "pointer", color: COLORS.inkSoft, fontSize: 18, lineHeight: 1 }}>×</span>
+                </div>
+
+                {totalParticipants > 0 && (
+                  <div style={{ display: "flex", gap: 24, margin: "14px 0" }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12, color: COLORS.brassDeep, marginBottom: 4, fontWeight: 500 }}>Free</div>
+                      {people.length === 0
+                        ? <div style={{ fontSize: 13, color: COLORS.inkSoft }}>No one, yet</div>
+                        : people.map((p) => <div key={p.email} style={{ fontSize: 13 }}>{p.name}</div>)}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12, color: COLORS.inkSoft, marginBottom: 4, fontWeight: 500 }}>Not free</div>
+                      {absent.length === 0
+                        ? <div style={{ fontSize: 13, color: COLORS.inkSoft }}>Everyone's free</div>
+                        : absent.map((p) => <div key={p.email} style={{ fontSize: 13, color: COLORS.inkSoft }}>{p.name}</div>)}
+                    </div>
+                  </div>
+                )}
+
+                {!isAdmin && (
+                  <p style={{ fontSize: 13, color: COLORS.inkSoft, marginTop: 12, marginBottom: 0 }}>
+                    Only the plan's organizer can finalize and send the invite from here.
+                  </p>
+                )}
+
+                {isAdmin && (
+                  <Fragment>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0" }}>
+                      <label style={{ ...styles.label, marginBottom: 0 }}>Duration</label>
+                      <select style={{ ...styles.input, width: "auto" }} value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
+                        {DURATION_OPTIONS.map((m) => <option key={m} value={m}>{durationLabel(m)}</option>)}
+                      </select>
+                    </div>
+
+                    {people.length > 0 && (
+                      <div style={{ marginBottom: 16 }}>
+                        <label style={{ ...styles.label, marginBottom: 8 }}>Include on the invite</label>
+                        {people.map((p) => (
+                          <label key={p.email} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, marginBottom: 6, cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={!excludedEmails.has(p.email)}
+                              onChange={() => setExcludedEmails((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(p.email)) next.delete(p.email); else next.add(p.email);
+                                return next;
+                              })}
+                            />
+                            {p.name} <span style={{ color: COLORS.inkSoft }}>({p.email})</span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <button style={styles.button} onClick={() => window.open(googleCalendarUrl(eventDoc.name, startDT, endDT, details, eventDoc.location, attendeeEmails), "_blank")}>Google Calendar</button>
+                      <button style={styles.buttonGhost} onClick={() => window.open(outlookWebUrl(eventDoc.name, startDT, endDT, details, eventDoc.location, attendeeEmails), "_blank")}>Outlook</button>
+                      <button style={styles.buttonGhost} onClick={() => downloadICS(eventDoc.name, startDT, endDT, details, eventDoc.location, included, eventDoc.organizerName, adminEmail)}>Apple / other (.ics)</button>
+                    </div>
+                    <p style={{ fontSize: 12, color: COLORS.inkSoft, marginTop: 12, marginBottom: 0 }}>
+                      Guest lists are pre-filled where your calendar app supports it — review before sending.
+                    </p>
+                  </Fragment>
+                )}
+              </div>
+            );
+          })()}
+
+          {activeTab === "mine" && nameConfirmed && (
+            <div style={{ marginTop: 20, display: "flex", alignItems: "center", gap: 14 }}>
+              <button style={styles.button} onClick={saveAvailability}>{saveState === "saving" ? "Saving…" : "Save availability"}</button>
+              {saveState === "saved" && <span style={{ fontSize: 13, color: COLORS.brassDeep }}>Saved.</span>}
+              {saveState === "error" && <span style={styles.errorText}>{saveError}</span>}
+            </div>
+          )}
+
+          {showResponseNudge && !currentUser && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", border: `1px solid ${COLORS.brassDeep}`, borderRadius: 6, padding: "12px 16px", marginTop: 16, background: COLORS.heat1 }}>
+              <span style={{ fontSize: 13, color: COLORS.ink }}>
+                Saved. Want a free account so you don't have to re-enter your info next time, and can see every plan you're part of in one place?
+              </span>
+              <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+                <button
+                  style={{ ...styles.buttonGhost, padding: "6px 14px", fontSize: 13 }}
+                  onClick={() => { setAuthPromptOpen(true); setShowResponseNudge(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                >
+                  Create a free account / Sign in
+                </button>
+                <span onClick={() => setShowResponseNudge(false)} style={{ cursor: "pointer", color: COLORS.inkSoft, fontSize: 13, alignSelf: "center" }}>No thanks</span>
+              </div>
+            </div>
+          )}
+
+          {loadError && <p style={styles.errorText}>{loadError}</p>}
+          <DonateAffiliateStrip isPaid={false} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.root}>
+      <div style={styles.shell}><p>Loading…</p></div>
+    </div>
+  );
+}
+
+function AuthHeader({ currentUser, onHome, onDashboard, onSignOut, authPromptOpen, setAuthPromptOpen, authEmail, setAuthEmail, authState, onSendMagicLink, authError, styles }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 40, flexWrap: "wrap", gap: 12 }}>
+      <span style={{ ...styles.wordmark, marginBottom: 0 }} onClick={onHome}>Commonhour</span>
+      <div style={{ fontSize: 13 }}>
+        {currentUser ? (
+          <span style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <span onClick={onDashboard} style={{ cursor: "pointer", color: COLORS.brassDeep, fontWeight: 600 }}>My polls</span>
+            <span onClick={onSignOut} style={{ cursor: "pointer", color: COLORS.inkSoft }}>Sign out</span>
+          </span>
+        ) : !authPromptOpen ? (
+          <button style={{ ...styles.button, padding: "8px 16px", fontSize: 13 }} onClick={() => setAuthPromptOpen(true)}>
+            Create Free Account / Sign In
+          </button>
+        ) : authState === "sent" ? (
+          <span style={{ color: COLORS.inkSoft }}>Check your email for a sign-in link.</span>
+        ) : (
+          <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <input
+              style={{ ...styles.input, width: "auto", fontSize: 13, padding: "6px 10px" }}
+              placeholder="you@example.com"
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onSendMagicLink()}
+            />
+            <button style={{ ...styles.buttonGhost, padding: "6px 12px", fontSize: 13 }} onClick={onSendMagicLink} disabled={authState === "sending"}>
+              {authState === "sending" ? "Sending…" : "Send link"}
+            </button>
+            <span onClick={() => setAuthPromptOpen(false)} style={{ cursor: "pointer", color: COLORS.inkSoft, fontSize: 12 }}>Cancel</span>
+            {authState === "error" && <span style={{ color: COLORS.danger, fontSize: 12 }}>{authError || "Enter a valid email."}</span>}
+            {authState !== "error" && <span style={{ color: COLORS.inkSoft, fontSize: 11 }}>Already have one? Same box signs you back in.</span>}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DonateAffiliateStrip({ isPaid }) {
+  if (isPaid) return null;
+  return (
+    <div style={{ marginTop: 32, paddingTop: 16, borderTop: `1px solid ${COLORS.line}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+      <span style={{ fontSize: 12, color: COLORS.inkSoft }}>
+        Sponsored{/* Replace this slot with real affiliate content once a partner is set up. */}
+      </span>
+      {window.DONATE_URL ? (
+        <a href={window.DONATE_URL} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: COLORS.brassDeep, fontWeight: 600, textDecoration: "none" }}>
+          Support Commonhour — no perks, just keeps it free
+        </a>
+      ) : null}
+    </div>
+  );
+}
+
+function ScheduleGrid({ dates, slots, eventTz, displayTz, mode, editable, selected, onCellDown, onCellEnter, countAt, totalParticipants, hoverInfo, setHoverInfo, chosenSlot, onCellClick, locked, notFreeAt }) {
+  const cellH = 22, timeColW = 76, dateColW = 84;
+  const rowLabels = computeRowLabels(dates, slots, eventTz, displayTz);
+  const cellEditableGrid = editable && !locked;
+
+  // Touch devices don't fire mouseenter across elements during a drag, so
+  // dragging to select multiple cells needs its own handling: find whatever
+  // cell is physically under the finger on each move, using elementFromPoint
+  // plus a data-key attribute on each cell to identify it.
+  function keyFromTouch(touch) {
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    return el && el.dataset ? el.dataset.key : null;
+  }
+
+  function handleTouchStart(e) {
+    if (!cellEditableGrid) return;
+    const key = keyFromTouch(e.touches[0]);
+    if (key) onCellDown(key);
+  }
+
+  function handleTouchMove(e) {
+    if (!cellEditableGrid) return;
+    e.preventDefault();
+    const key = keyFromTouch(e.touches[0]);
+    if (key) onCellEnter(key);
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <div style={{ overflowX: "auto", paddingBottom: 8, opacity: locked ? 0.45 : 1, transition: "opacity 120ms" }}>
+        <div
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          style={{ display: "grid", gridTemplateColumns: `${timeColW}px repeat(${dates.length}, ${dateColW}px)`, userSelect: "none", minWidth: timeColW + dates.length * dateColW }}
+        >
+          <div style={{ height: 40 }} />
+          {dates.map((d) => {
+            const { wd, md } = columnDateLabel(d, slots, eventTz, displayTz);
+            return (
+              <div key={d} style={{ height: 40, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", borderBottom: `1px solid ${COLORS.line}`, fontSize: 13 }}>
+                <div style={{ color: COLORS.inkSoft, fontSize: 11 }}>{wd}</div>
+                <div style={{ fontWeight: 500 }}>{md}</div>
+              </div>
+            );
+          })}
+          {slots.map((m, i) => {
+            const rowInfo = rowLabels[i];
+            const isHourStart = m % 60 === 0;
+            return (
+              <Fragment key={m}>
+                <div style={{ height: cellH, fontSize: 11, color: COLORS.inkSoft, textAlign: "right", paddingRight: 8, position: "relative", top: -6 }}>
+                  {isHourStart && (
+                    <span>
+                      {rowInfo.label}
+                      {rowInfo.dayDiff !== 0 && (
+                        <sup style={{ marginLeft: 2, color: COLORS.brass }}>{rowInfo.dayDiff > 0 ? `+${rowInfo.dayDiff}` : rowInfo.dayDiff}</sup>
+                      )}
+                    </span>
+                  )}
+                </div>
+                {dates.map((d) => {
+                  const key = slotKey(d, m);
+                  let bg = COLORS.paperRaised, title = "";
+                  const isChosen = mode === "group" && chosenSlot && chosenSlot.date === d && chosenSlot.m === m;
+                  const cellEditable = editable && !locked;
+                  if (mode === "mine") {
+                    bg = selected.has(key) ? COLORS.brass : COLORS.paperRaised;
+                  } else {
+                    const people = countAt(key);
+                    const ratio = totalParticipants > 0 ? people.length / totalParticipants : 0;
+                    bg = heatColor(ratio);
+                    title = people.length > 0 ? people.map((p) => p.name).join(", ") : "";
+                  }
+                  return (
+                    <div key={key}
+                      data-key={key}
+                      onMouseDown={() => cellEditable && onCellDown(key)}
+                      onClick={() => mode === "group" && onCellClick && onCellClick(d, m)}
+                      onMouseEnter={() => {
+                        if (cellEditable) onCellEnter(key);
+                        if (mode === "group") {
+                          const people = countAt(key);
+                          const absent = notFreeAt ? notFreeAt(key) : [];
+                          setHoverInfo(people.length || absent.length ? { key, people, absent } : null);
+                        }
+                      }}
+                      onMouseLeave={() => { if (mode === "group") setHoverInfo(null); }}
+                      style={{ height: cellH, background: bg, borderLeft: `1px solid ${COLORS.lineSoft}`, borderTop: isHourStart ? `1px solid ${COLORS.line}` : `1px solid ${COLORS.lineSoft}`, outline: isChosen ? `2px solid ${COLORS.brassDeep}` : "none", outlineOffset: isChosen ? "-2px" : "0", cursor: cellEditable || mode === "group" ? "pointer" : "default", touchAction: cellEditable ? "none" : "auto", boxSizing: "border-box" }}
+                      title={title}
+                    />
+                  );
+                })}
+              </Fragment>
+            );
+          })}
+        </div>
+      </div>
+      {mode === "group" && hoverInfo && (hoverInfo.people.length > 0 || hoverInfo.absent.length > 0) && (
+        <div style={{ marginTop: 10, fontSize: 13, color: COLORS.ink, background: COLORS.paperRaised, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "8px 12px", display: "inline-block" }}>
+          {hoverInfo.people.length > 0 && <div>Free: {hoverInfo.people.map((p) => p.name).join(", ")}</div>}
+          {hoverInfo.absent.length > 0 && <div style={{ color: COLORS.inkSoft }}>Not free: {hoverInfo.absent.map((p) => p.name).join(", ")}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<CommonhourApp />);
+</script>
+</body>
+</html>
