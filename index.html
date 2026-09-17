@@ -421,6 +421,16 @@ function CommonhourApp() {
   const [authMode, setAuthMode] = useState("password");
   const [authState, setAuthState] = useState("idle"); // idle | sending | sent | error
   const [authError, setAuthError] = useState("");
+  // Set true when Supabase's PASSWORD_RECOVERY auth event fires (i.e. the
+  // person arrived via a "reset your password" email link). That link
+  // deliberately signs the browser in — it needs a valid session to
+  // authorize the password change — but that session is only meant to
+  // gate a "set your new password" step, not to drop them straight into
+  // the app as if they'd signed in normally.
+  const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordState, setNewPasswordState] = useState("idle"); // idle | saving | error
+  const [newPasswordError, setNewPasswordError] = useState("");
   const [myPolls, setMyPolls] = useState(null);
   const [dashboardDeletingId, setDashboardDeletingId] = useState(null);
   const [dashboardError, setDashboardError] = useState("");
@@ -428,11 +438,34 @@ function CommonhourApp() {
   useEffect(() => {
     if (!supabaseClient) return;
     supabaseClient.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: listener } = supabaseClient.auth.onAuthStateChange((_event, s) => setSession(s));
+    const { data: listener } = supabaseClient.auth.onAuthStateChange((event, s) => {
+      setSession(s);
+      if (event === "PASSWORD_RECOVERY") setPasswordRecoveryMode(true);
+    });
     return () => listener.subscription.unsubscribe();
   }, []);
 
   const currentUser = session ? session.user : null;
+
+  async function handleSetNewPassword() {
+    setNewPasswordError("");
+    if (!newPassword || newPassword.length < 8) {
+      setNewPasswordState("error");
+      setNewPasswordError("Password needs to be at least 8 characters.");
+      return;
+    }
+    setNewPasswordState("saving");
+    try {
+      const { error } = await supabaseClient.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      setPasswordRecoveryMode(false);
+      setNewPassword("");
+      setNewPasswordState("idle");
+    } catch (e) {
+      setNewPasswordState("error");
+      setNewPasswordError((e && e.message) ? e.message : "Couldn't set your password. Try again.");
+    }
+  }
 
   // Closes the modal and resets its fields the moment sign-in actually
   // succeeds (password sign-in resolves synchronously into a session;
@@ -1023,6 +1056,40 @@ function CommonhourApp() {
             the <code>SUPABASE_URL</code> / <code>SUPABASE_ANON_KEY</code> variables near the top of
             <code> index.html</code>. Full steps are in <code>README.md</code>.
           </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Blocks the rest of the app until a new password is actually set. The
+  // session at this point exists only because the recovery link signed
+  // the browser in to authorize this one action — letting them wander
+  // into the app instead would leave the reset silently unfinished.
+  if (passwordRecoveryMode) {
+    return (
+      <div style={styles.root}>
+        <div style={styles.shell}>
+          <span style={styles.wordmark}>Commonhour</span>
+          <h1 style={{ ...styles.h1, fontSize: 26 }}>Set a new password</h1>
+          <p style={{ ...styles.sub, maxWidth: 420 }}>
+            You're here via a password reset link. Choose a new password to finish.
+          </p>
+          <div style={{ maxWidth: 340 }}>
+            <label style={styles.label}>New password</label>
+            <input
+              style={styles.input}
+              type="password"
+              autoComplete="new-password"
+              placeholder="At least 8 characters"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSetNewPassword()}
+            />
+            {newPasswordState === "error" && <p style={styles.errorText}>{newPasswordError}</p>}
+            <button style={{ ...styles.button, marginTop: 14 }} onClick={handleSetNewPassword} disabled={newPasswordState === "saving"}>
+              {newPasswordState === "saving" ? "Saving…" : "Set password"}
+            </button>
+          </div>
         </div>
       </div>
     );
