@@ -149,17 +149,43 @@ $$;
 grant execute on function save_availability(text, text, text, jsonb) to anon, authenticated;
 ```
 
-## 3. Enable magic-link sign-in
+## 2b. Run migration 002 (delete, booking, auto-expiry)
 
-In your new project: **Authentication → Providers → Email** — confirm Email
-is enabled (it is by default). Then **Authentication → URL Configuration**:
+Run `migration_002_delete_and_expiry.sql` next, in the same SQL Editor —
+it adds the `book_plan` / `delete_plan` functions, the columns that track
+a plan's booked date, and the `cleanup_expired_plans` function.
+
+**Then, as a separate manual step** (not paste-and-run SQL): go to
+**Database → Extensions** in the dashboard and enable `pg_cron` (and
+`pg_net` if it's not already on). Once enabled, run this once in the SQL
+Editor to schedule the daily cleanup:
+
+```sql
+select cron.schedule(
+  'cleanup-expired-plans',
+  '0 3 * * *',
+  $$select cleanup_expired_plans();$$
+);
+```
+
+Without this step, plans will never auto-expire — the `delete_plan` and
+`book_plan` functions work immediately either way, only the scheduled
+cleanup needs the extension.
+
+## 3. Enable sign-in (magic link, OTP, and password)
+
+In your new project: **Authentication → Providers → Email** — confirm
+Email is enabled (it is by default). This one toggle covers all three
+sign-in methods the app offers (magic link, OTP code, and password) — no
+separate provider setup needed. Then **Authentication → URL
+Configuration**:
 
 - **Site URL**: your Commonhour Netlify URL (once you have one — see below)
 - **Redirect URLs**: the same URL
 
 You can come back and set these once you know the deployed URL — the app
-works before this is set, but magic-link emails won't redirect correctly
-until it is.
+works before this is set, but magic-link and password-reset emails won't
+redirect correctly until it is.
 
 ## 4. Configure the site
 
@@ -196,21 +222,27 @@ as the Site URL / Redirect URL in Supabase.
 ## What's built vs. what's next
 
 **Built:** anonymous quick polls (12-response cap), free accounts via magic
-link (unlimited responses, permanent "My polls" history, automatic admin
-recognition on your own plans), timezone-aware scheduling, location field,
-calendar invite creation (Google Calendar, Outlook, `.ics`) — available to
-every tier, always.
+link, OTP, or password (unlimited responses, permanent "My Plans" history,
+automatic admin recognition on your own plans), delete a plan (account
+owners can delete directly; anonymous organizers must sign in as the
+confirmed organizer email first — deletion always requires a real session,
+never just the locally-remembered admin flag), timezone-aware scheduling,
+location field, calendar invite creation (Google Calendar, Outlook, .ics)
+— available to every tier, always — and auto-expiry (10 days after a
+booked date, 30 days after the last candidate date if never booked).
 
 **Not yet built:** paid subscriptions (Stripe checkout + webhooks + feature
-gating), calendar auto-fill (Google/Outlook OAuth), required/optional
+gating), sponsored/ad slot (Google AdSense) and its required privacy
+policy page, calendar auto-fill (Google/Outlook OAuth), required/optional
 attendees, deadlines + auto-nudges, time+location joint polling. Each of
 these is a real, separate project.
 
 ## Known limitations (by design, for now)
 
-- No password reset flow needed — magic link is the entire auth model.
 - Anyone with a plan's code can still read and respond to it (no accounts
   required) — same trust model as When2Meet or Doodle.
-- Email-based admin recognition for anonymous plans is weaker than the
-  account-based version — anyone who knows or guesses the organizer's email
-  can claim admin on a plan that was never linked to an account.
+- An anonymous organizer who never actually signs in (just types a
+  matching email) can unlock booking/viewing on their own plan, but
+  **cannot** delete it or get the precise 10-day-post-booking expiry —
+  both require a real session per migration 002. Their plan instead falls
+  back to the 30-day-after-last-date expiry. Signing in resolves this.
