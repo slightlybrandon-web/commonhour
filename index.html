@@ -280,12 +280,55 @@ async function dbGetEvent(id) {
   };
 }
 
-// ---------------- Auth (Supabase magic link) ----------------
+// Persists the organizer's final choice server-side (booked date, slot,
+// duration). Nothing tracked this before booking was purely a client-side
+// calendar-link action — this is what auto-expiry (10 days after the
+// booked date) is computed from, so it has to actually be saved.
+async function dbBookPlan(eventId, dateStr, minutes, duration) {
+  const { error } = await supabaseClient.rpc("book_plan", {
+    p_id: eventId, p_date: dateStr, p_minutes: minutes, p_duration: duration,
+  });
+  if (error) throw error;
+}
+
+// Deletion is permanent, so unlike admin *recognition* elsewhere in the
+// app, this always goes through the server-side check that requires an
+// actual signed-in session — never just a typed email. See migration 002.
+async function dbDeletePlan(eventId) {
+  const { error } = await supabaseClient.rpc("delete_plan", { p_id: eventId });
+  if (error) throw error;
+}
+
+// ---------------- Auth (Supabase: magic link, OTP, or password) ----------------
 
 async function sendMagicLink(email) {
   const { error } = await supabaseClient.auth.signInWithOtp({
     email,
     options: { emailRedirectTo: window.location.origin + window.location.pathname + window.location.search },
+  });
+  if (error) throw error;
+}
+
+// Password sign-up. If the email already has a password-based account,
+// Supabase returns success with no new user created and no confirmation
+// email sent (it deliberately doesn't reveal whether an account exists) —
+// callers should treat that ambiguity the same as "check your email."
+async function signUpWithPassword(email, password) {
+  const { error } = await supabaseClient.auth.signUp({
+    email, password,
+    options: { emailRedirectTo: window.location.origin + window.location.pathname + window.location.search },
+  });
+  if (error) throw error;
+}
+
+async function signInWithPassword(email, password) {
+  const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+}
+
+async function sendPasswordReset(email) {
+  const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin + window.location.pathname + window.location.search,
   });
   if (error) throw error;
 }
@@ -373,9 +416,13 @@ function CommonhourApp() {
   const [showSaveNudge, setShowSaveNudge] = useState(false);
   const [showResponseNudge, setShowResponseNudge] = useState(false);
   const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  // password (default, fastest) | link (passwordless fallback) | reset (forgot password)
+  const [authMode, setAuthMode] = useState("password");
   const [authState, setAuthState] = useState("idle"); // idle | sending | sent | error
   const [authError, setAuthError] = useState("");
   const [myPolls, setMyPolls] = useState(null);
+  const [dashboardDeletingId, setDashboardDeletingId] = useState(null);
   const [dashboardError, setDashboardError] = useState("");
 
   useEffect(() => {
@@ -386,6 +433,26 @@ function CommonhourApp() {
   }, []);
 
   const currentUser = session ? session.user : null;
+
+  // Closes the modal and resets its fields the moment sign-in actually
+  // succeeds (password sign-in resolves synchronously into a session;
+  // magic-link/reset resolve later via onAuthStateChange picking up the
+  // redirect) rather than requiring the person to dismiss it themselves.
+  useEffect(() => {
+    if (currentUser && authPromptOpen) {
+      setAuthPromptOpen(false);
+      setAuthEmail("");
+      setAuthPassword("");
+      setAuthMode("password");
+      setAuthState("idle");
+      setAuthError("");
+    }
+  }, [currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function resetAuthFeedback() {
+    setAuthState("idle");
+    setAuthError("");
+  }
 
   async function handleSendMagicLink() {
     setAuthError("");
@@ -404,6 +471,52 @@ function CommonhourApp() {
     }
   }
 
+  async function handlePasswordSignIn() {
+    setAuthError("");
+    if (!isValidEmail(authEmail)) { setAuthState("error"); setAuthError("Enter a valid email."); return; }
+    if (!authPassword) { setAuthState("error"); setAuthError("Enter your password."); return; }
+    setAuthState("sending");
+    try {
+      await signInWithPassword(authEmail.trim(), authPassword);
+      // success closes the modal via the useEffect above once the session lands
+    } catch (e) {
+      setAuthState("error");
+      const msg = (e && e.message) || "";
+      setAuthError(
+        msg.toLowerCase().indexOf("invalid") !== -1
+          ? "Wrong email or password."
+          : (msg || "Something went wrong signing in.")
+      );
+    }
+  }
+
+  async function handlePasswordSignUp() {
+    setAuthError("");
+    if (!isValidEmail(authEmail)) { setAuthState("error"); setAuthError("Enter a valid email."); return; }
+    if (!authPassword || authPassword.length < 8) { setAuthState("error"); setAuthError("Password needs to be at least 8 characters."); return; }
+    setAuthState("sending");
+    try {
+      await signUpWithPassword(authEmail.trim(), authPassword);
+      setAuthState("sent"); // Supabase may require email confirmation depending on project settings
+    } catch (e) {
+      setAuthState("error");
+      setAuthError((e && e.message) ? e.message : "Something went wrong creating your account.");
+    }
+  }
+
+  async function handlePasswordReset() {
+    setAuthError("");
+    if (!isValidEmail(authEmail)) { setAuthState("error"); setAuthError("Enter a valid email."); return; }
+    setAuthState("sending");
+    try {
+      await sendPasswordReset(authEmail.trim());
+      setAuthState("sent");
+    } catch (e) {
+      setAuthState("error");
+      setAuthError((e && e.message) ? e.message : "Something went wrong sending the reset email.");
+    }
+  }
+
   const [eventId, setEventId] = useState(null);
   const [eventDoc, setEventDoc] = useState(null);
   const [availDoc, setAvailDoc] = useState({});
@@ -415,6 +528,9 @@ function CommonhourApp() {
   const [adminPromptEmail, setAdminPromptEmail] = useState("");
   const [adminPromptError, setAdminPromptError] = useState("");
   const [adminPromptBusy, setAdminPromptBusy] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
 
   const [personName, setPersonName] = useState("");
   const [personEmail, setPersonEmail] = useState("");
@@ -437,6 +553,21 @@ function CommonhourApp() {
   const [formName, setFormName] = useState("");
   const [formDates, setFormDates] = useState([]);
   const [dateInput, setDateInput] = useState("");
+  const dateInputRef = useRef(null);
+
+  // Native date inputs only open their picker when you hit the tiny
+  // calendar icon in most desktop browsers. This makes the whole box
+  // clickable instead. showPicker() isn't universally supported (older
+  // Safari in particular), so it falls back to a plain focus, which still
+  // opens the picker on most mobile browsers by default.
+  function openDatePicker() {
+    const el = dateInputRef.current;
+    if (!el) return;
+    if (typeof el.showPicker === "function") {
+      try { el.showPicker(); return; } catch (e) {}
+    }
+    el.focus();
+  }
   const [startMin, setStartMin] = useState(9 * 60);
   const [endMin, setEndMin] = useState(18 * 60);
   const [formDuration, setFormDuration] = useState(60);
@@ -512,6 +643,8 @@ function CommonhourApp() {
       setActiveTab("mine");
       setShowSaveNudge(false);
       setShowResponseNudge(false);
+      setDeleteConfirmOpen(false);
+      setDeleteError("");
       setDisplayTz(detectViewerTz());
       window.history.replaceState({}, "", `?event=${id}`);
       setBusy(false);
@@ -665,6 +798,58 @@ function CommonhourApp() {
     }
   }
 
+  // Deletion always goes through the server RPC (see migration 002), which
+  // requires an actual signed-in session matching the plan's owner or
+  // organizer email — never just the client-side "isAdmin" flag, since that
+  // flag can be set anonymously by typing an email with no proof of
+  // controlling it. If the person isn't signed in yet, this routes them
+  // into sign-in (pre-filled with the email they already confirmed as
+  // admin on this device, if any) rather than failing silently.
+  async function handleDeletePlan() {
+    setDeleteError("");
+    if (!currentUser) {
+      setDeleteConfirmOpen(false);
+      setAuthEmail(adminEmail || "");
+      setAuthMode("password");
+      setAuthPromptOpen(true);
+      return;
+    }
+    setDeleteBusy(true);
+    try {
+      await dbDeletePlan(eventId);
+      goHome();
+    } catch (e) {
+      setDeleteBusy(false);
+      const msg = (e && e.message) || "";
+      setDeleteError(
+        msg.indexOf("NOT_AUTHORIZED") !== -1
+          ? "This account doesn't match the plan's organizer, so it can't delete this plan."
+          : "Couldn't delete this plan. Try again."
+      );
+    }
+  }
+
+  // Plans in "Created by you" are always account-owned, so this delete is
+  // guaranteed to satisfy delete_plan's server-side check (auth.uid()
+  // matches the plan's user_id) — no sign-in detour needed here, unlike
+  // the anonymous-admin case on the plan page itself.
+  async function handleDashboardDelete(id, name, e) {
+    e.stopPropagation();
+    if (!window.confirm(`Delete "${name}" and every response? This can't be undone.`)) return;
+    setDashboardDeletingId(id);
+    setDashboardError("");
+    try {
+      await dbDeletePlan(id);
+      setMyPolls((prev) => prev ? {
+        created: prev.created.filter((p) => p.id !== id),
+        responded: prev.responded.filter((p) => p.id !== id),
+      } : prev);
+    } catch (e) {
+      setDashboardError("Couldn't delete that plan. Try again.");
+    }
+    setDashboardDeletingId(null);
+  }
+
   async function goDashboard() {
     if (!currentUser) return;
     setBusy(true);
@@ -703,6 +888,9 @@ function CommonhourApp() {
     setAdminPromptOpen(false);
     setAdminPromptEmail("");
     setAdminPromptError("");
+    setDeleteConfirmOpen(false);
+    setDeleteBusy(false);
+    setDeleteError("");
     setShowSaveNudge(false);
     setShowResponseNudge(false);
     window.history.replaceState({}, "", window.location.pathname);
@@ -806,6 +994,22 @@ function CommonhourApp() {
     chip: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, padding: "5px 10px", background: COLORS.paperRaised, border: `1px solid ${COLORS.line}`, borderRadius: 999, marginRight: 8, marginBottom: 8 },
     chipX: { cursor: "pointer", color: COLORS.inkSoft, fontWeight: 600 },
     errorText: { color: COLORS.danger, fontSize: 13, marginTop: 8 },
+    modalOverlay: { position: "fixed", inset: 0, background: "rgba(28,32,31,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1000 },
+    modalCard: { background: COLORS.paper, borderRadius: 8, padding: "32px 28px", width: "100%", maxWidth: 380, boxShadow: "0 12px 40px rgba(0,0,0,0.2)" },
+  };
+
+  // Bundled once so the (identical) AuthHeader call sites below don't each
+  // need to repeat a dozen individual props.
+  const authHeaderProps = {
+    currentUser, onHome: goHome, onDashboard: goDashboard, onSignOut: signOut,
+    authPromptOpen, setAuthPromptOpen,
+    authEmail, setAuthEmail, authPassword, setAuthPassword,
+    authMode, setAuthMode, authState, authError,
+    onSendMagicLink: handleSendMagicLink,
+    onPasswordSignIn: handlePasswordSignIn,
+    onPasswordSignUp: handlePasswordSignUp,
+    onPasswordReset: handlePasswordReset,
+    resetAuthFeedback, styles,
   };
 
   if (NOT_CONFIGURED) {
@@ -828,20 +1032,7 @@ function CommonhourApp() {
     return (
       <div style={styles.root}>
         <div style={styles.shell}>
-          <AuthHeader
-            currentUser={currentUser}
-            onHome={goHome}
-            onDashboard={goDashboard}
-            onSignOut={signOut}
-            authPromptOpen={authPromptOpen}
-            setAuthPromptOpen={setAuthPromptOpen}
-            authEmail={authEmail}
-            setAuthEmail={setAuthEmail}
-            authState={authState}
-            onSendMagicLink={handleSendMagicLink}
-            authError={authError}
-            styles={styles}
-          />
+          <AuthHeader {...authHeaderProps} />
           <h1 style={styles.h1}>Find the hour that works for everyone.</h1>
           <p style={styles.sub}>
             Lay out the dates and times you could meet. Share one link. Once you can see who's free
@@ -873,21 +1064,8 @@ function CommonhourApp() {
     return (
       <div style={styles.root}>
         <div style={styles.shell}>
-          <AuthHeader
-            currentUser={currentUser}
-            onHome={goHome}
-            onDashboard={goDashboard}
-            onSignOut={signOut}
-            authPromptOpen={authPromptOpen}
-            setAuthPromptOpen={setAuthPromptOpen}
-            authEmail={authEmail}
-            setAuthEmail={setAuthEmail}
-            authState={authState}
-            onSendMagicLink={handleSendMagicLink}
-            authError={authError}
-            styles={styles}
-          />
-          <h1 style={{ ...styles.h1, fontSize: 28 }}>My polls</h1>
+          <AuthHeader {...authHeaderProps} />
+          <h1 style={{ ...styles.h1, fontSize: 28 }}>My Plans</h1>
           <p style={styles.sub}>Everything you've created or responded to, saved to your account.</p>
           {busy && <p style={{ color: COLORS.inkSoft }}>Loading…</p>}
           {dashboardError && <p style={styles.errorText}>{dashboardError}</p>}
@@ -897,8 +1075,14 @@ function CommonhourApp() {
                 <h2 style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: 16, marginBottom: 10 }}>Created by you</h2>
                 {myPolls.created.length === 0 && <p style={{ fontSize: 13, color: COLORS.inkSoft }}>No plans yet.</p>}
                 {myPolls.created.map((p) => (
-                  <div key={p.id} onClick={() => loadEvent(p.id)} style={{ cursor: "pointer", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}`, fontSize: 14 }}>
-                    {p.name}
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}`, fontSize: 14 }}>
+                    <span onClick={() => loadEvent(p.id)} style={{ cursor: "pointer", flex: 1 }}>{p.name}</span>
+                    <span
+                      onClick={(e) => handleDashboardDelete(p.id, p.name, e)}
+                      style={{ cursor: "pointer", color: COLORS.danger, fontSize: 12, marginLeft: 12, flexShrink: 0 }}
+                    >
+                      {dashboardDeletingId === p.id ? "Deleting…" : "Delete"}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -924,20 +1108,7 @@ function CommonhourApp() {
     return (
       <div style={styles.root}>
         <div style={styles.shell}>
-          <AuthHeader
-            currentUser={currentUser}
-            onHome={goHome}
-            onDashboard={goDashboard}
-            onSignOut={signOut}
-            authPromptOpen={authPromptOpen}
-            setAuthPromptOpen={setAuthPromptOpen}
-            authEmail={authEmail}
-            setAuthEmail={setAuthEmail}
-            authState={authState}
-            onSendMagicLink={handleSendMagicLink}
-            authError={authError}
-            styles={styles}
-          />
+          <AuthHeader {...authHeaderProps} />
           <h1 style={{ ...styles.h1, fontSize: 30 }}>Set up your plan</h1>
           <p style={styles.sub}>Everything here is shown to invitees once they open the plan.</p>
           <div style={{ maxWidth: 460 }}>
@@ -949,7 +1120,14 @@ function CommonhourApp() {
             <div style={{ marginBottom: 20 }}>
               <label style={styles.label}>Dates</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <input type="date" style={styles.input} value={dateInput} onChange={(e) => addDate(e.target.value)} />
+                <input
+                  ref={dateInputRef}
+                  type="date"
+                  style={{ ...styles.input, cursor: "pointer" }}
+                  value={dateInput}
+                  onChange={(e) => addDate(e.target.value)}
+                  onClick={openDatePicker}
+                />
               </div>
               <p style={styles.hint}>Add every date that could work — people will mark which ones they're actually free.</p>
               <div style={{ marginTop: 8 }}>
@@ -1004,8 +1182,8 @@ function CommonhourApp() {
             <div style={{ marginBottom: 28 }}>
               <label style={styles.label}>Your name and email</label>
               <div style={{ display: "flex", gap: 8 }}>
-                <input style={styles.input} placeholder="Your name" value={formOrgName} onChange={(e) => setFormOrgName(e.target.value)} />
-                <input style={styles.input} placeholder="you@example.com" value={formOrgEmail} onChange={(e) => setFormOrgEmail(e.target.value)} />
+                <input style={styles.input} type="text" autoComplete="name" placeholder="Your name" value={formOrgName} onChange={(e) => setFormOrgName(e.target.value)} />
+                <input style={styles.input} type="email" autoComplete="email" inputMode="email" placeholder="you@example.com" value={formOrgEmail} onChange={(e) => setFormOrgEmail(e.target.value)} />
               </div>
               <p style={styles.hint}>You're the organizer — this carries over automatically and lets you finalize a time later.</p>
             </div>
@@ -1026,20 +1204,7 @@ function CommonhourApp() {
     return (
       <div style={styles.root} onMouseUp={endDrag} onTouchEnd={endDrag}>
         <div style={styles.shell}>
-          <AuthHeader
-            currentUser={currentUser}
-            onHome={goHome}
-            onDashboard={goDashboard}
-            onSignOut={signOut}
-            authPromptOpen={authPromptOpen}
-            setAuthPromptOpen={setAuthPromptOpen}
-            authEmail={authEmail}
-            setAuthEmail={setAuthEmail}
-            authState={authState}
-            onSendMagicLink={handleSendMagicLink}
-            authError={authError}
-            styles={styles}
-          />
+          <AuthHeader {...authHeaderProps} />
 
           {showSaveNudge && !currentUser && (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", border: `1px solid ${COLORS.brassDeep}`, borderRadius: 6, padding: "12px 16px", marginBottom: 20, background: COLORS.heat1 }}>
@@ -1084,9 +1249,31 @@ function CommonhourApp() {
           </div>
 
           {isAdmin ? (
-            <p style={{ fontSize: 12, color: COLORS.inkSoft, marginBottom: 20 }}>
-              You're recognized as the organizer on this device — booking controls are unlocked below.
-            </p>
+            <div style={{ marginBottom: 20 }}>
+              <p style={{ fontSize: 12, color: COLORS.inkSoft, margin: "0 0 6px" }}>
+                You're recognized as the organizer on this device — booking controls are unlocked below.
+              </p>
+              {!deleteConfirmOpen ? (
+                <span onClick={() => { setDeleteConfirmOpen(true); setDeleteError(""); }} style={{ fontSize: 12, color: COLORS.danger, cursor: "pointer", textDecoration: "underline" }}>
+                  Delete this plan
+                </span>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", border: `1px solid ${COLORS.danger}`, borderRadius: 4, padding: "8px 12px", background: "#FBEEEC" }}>
+                  <span style={{ fontSize: 12, color: COLORS.ink }}>
+                    Delete "{eventDoc.name}" and every response? This can't be undone.
+                  </span>
+                  <button
+                    style={{ ...styles.buttonGhost, padding: "5px 12px", fontSize: 12, borderColor: COLORS.danger, color: COLORS.danger }}
+                    onClick={handleDeletePlan}
+                    disabled={deleteBusy}
+                  >
+                    {deleteBusy ? "Deleting…" : "Yes, delete it"}
+                  </button>
+                  <span onClick={() => setDeleteConfirmOpen(false)} style={{ fontSize: 12, color: COLORS.inkSoft, cursor: "pointer" }}>Cancel</span>
+                </div>
+              )}
+              {deleteError && <p style={{ ...styles.errorText, marginTop: 6 }}>{deleteError}</p>}
+            </div>
           ) : (
             <div style={{ marginBottom: 20 }}>
               {!adminPromptOpen ? (
@@ -1097,6 +1284,9 @@ function CommonhourApp() {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <input
                     style={{ ...styles.input, width: "auto", fontSize: 13, padding: "6px 10px" }}
+                    type="email"
+                    autoComplete="email"
+                    inputMode="email"
                     placeholder="you@example.com"
                     value={adminPromptEmail}
                     onChange={(e) => setAdminPromptEmail(e.target.value)}
@@ -1143,8 +1333,8 @@ function CommonhourApp() {
             <div style={{ maxWidth: 420, marginBottom: 8 }}>
               <label style={styles.label}>Your name and email</label>
               <div style={{ display: "flex", gap: 8 }}>
-                <input style={styles.input} placeholder="Your name" value={personName} onChange={(e) => setPersonName(e.target.value)} />
-                <input style={styles.input} placeholder="you@example.com" value={personEmail} onChange={(e) => setPersonEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirmIdentity()} />
+                <input style={styles.input} type="text" autoComplete="name" placeholder="Your name" value={personName} onChange={(e) => setPersonName(e.target.value)} />
+                <input style={styles.input} type="email" autoComplete="email" inputMode="email" placeholder="you@example.com" value={personEmail} onChange={(e) => setPersonEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirmIdentity()} />
               </div>
               <p style={styles.hint}>We'll use this to add you to the calendar invite once a time is picked.</p>
               {confirmError && <p style={styles.errorText}>{confirmError}</p>}
@@ -1207,6 +1397,21 @@ function CommonhourApp() {
             const { wd, md } = dateLabel(localStart.toISODate());
             const details = `Scheduled with Commonhour.` + (included.length ? ` Confirmed free: ${included.map((p) => p.name).join(", ")}.` : "");
             const attendeeEmails = included.map((p) => p.email);
+
+            // Persists the booked time server-side (needed for the 10-day
+            // auto-expiry) before actually opening the calendar action.
+            // Best-effort: if it fails — e.g. an anonymous organizer who
+            // confirmed their email but never actually signed in, so there's
+            // no session for the RPC to authorize — we still let them get
+            // their invite rather than blocking on it; that plan just falls
+            // back to the 30-day-from-last-date expiry instead of 10 days
+            // from the booked date.
+            async function bookThenRun(action) {
+              try {
+                await dbBookPlan(eventId, chosenSlot.date, chosenSlot.m, duration);
+              } catch (e) {}
+              action();
+            }
 
             return (
               <div style={{ marginTop: 20, padding: 20, border: `1px solid ${COLORS.line}`, borderRadius: 6, background: COLORS.paperRaised, maxWidth: 480 }}>
@@ -1274,9 +1479,9 @@ function CommonhourApp() {
                     )}
 
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                      <button style={styles.button} onClick={() => window.open(googleCalendarUrl(eventDoc.name, startDT, endDT, details, eventDoc.location, attendeeEmails), "_blank")}>Google Calendar</button>
-                      <button style={styles.buttonGhost} onClick={() => window.open(outlookWebUrl(eventDoc.name, startDT, endDT, details, eventDoc.location, attendeeEmails), "_blank")}>Outlook</button>
-                      <button style={styles.buttonGhost} onClick={() => downloadICS(eventDoc.name, startDT, endDT, details, eventDoc.location, included, eventDoc.organizerName, adminEmail)}>Apple / other (.ics)</button>
+                      <button style={styles.button} onClick={() => bookThenRun(() => window.open(googleCalendarUrl(eventDoc.name, startDT, endDT, details, eventDoc.location, attendeeEmails), "_blank"))}>Google Calendar</button>
+                      <button style={styles.buttonGhost} onClick={() => bookThenRun(() => window.open(outlookWebUrl(eventDoc.name, startDT, endDT, details, eventDoc.location, attendeeEmails), "_blank"))}>Outlook</button>
+                      <button style={styles.buttonGhost} onClick={() => bookThenRun(() => downloadICS(eventDoc.name, startDT, endDT, details, eventDoc.location, included, eventDoc.organizerName, adminEmail))}>Apple / other (.ics)</button>
                     </div>
                     <p style={{ fontSize: 12, color: COLORS.inkSoft, marginTop: 12, marginBottom: 0 }}>
                       Guest lists are pre-filled where your calendar app supports it — review before sending.
@@ -1326,40 +1531,145 @@ function CommonhourApp() {
   );
 }
 
-function AuthHeader({ currentUser, onHome, onDashboard, onSignOut, authPromptOpen, setAuthPromptOpen, authEmail, setAuthEmail, authState, onSendMagicLink, authError, styles }) {
+function AuthHeader({
+  currentUser, onHome, onDashboard, onSignOut,
+  authPromptOpen, setAuthPromptOpen,
+  authEmail, setAuthEmail, authPassword, setAuthPassword,
+  authMode, setAuthMode, authState, authError,
+  onSendMagicLink, onPasswordSignIn, onPasswordSignUp, onPasswordReset,
+  resetAuthFeedback, styles,
+}) {
+  function closeModal() {
+    setAuthPromptOpen(false);
+    setAuthEmail("");
+    setAuthPassword("");
+    setAuthMode("password");
+    resetAuthFeedback();
+  }
+
+  function switchMode(mode) {
+    setAuthMode(mode);
+    resetAuthFeedback();
+  }
+
+  function submitOnEnter(e) {
+    if (e.key !== "Enter") return;
+    if (authMode === "password") onPasswordSignIn();
+    else if (authMode === "link") onSendMagicLink();
+    else if (authMode === "reset") onPasswordReset();
+  }
+
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 40, flexWrap: "wrap", gap: 12 }}>
       <span style={{ ...styles.wordmark, marginBottom: 0 }} onClick={onHome}>Commonhour</span>
       <div style={{ fontSize: 13 }}>
         {currentUser ? (
           <span style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <span onClick={onDashboard} style={{ cursor: "pointer", color: COLORS.brassDeep, fontWeight: 600 }}>My polls</span>
+            <span onClick={onDashboard} style={{ cursor: "pointer", color: COLORS.brassDeep, fontWeight: 600 }}>My Plans</span>
             <span onClick={onSignOut} style={{ cursor: "pointer", color: COLORS.inkSoft }}>Sign out</span>
           </span>
-        ) : !authPromptOpen ? (
+        ) : (
           <button style={{ ...styles.button, padding: "8px 16px", fontSize: 13 }} onClick={() => setAuthPromptOpen(true)}>
             Create Free Account / Sign In
           </button>
-        ) : authState === "sent" ? (
-          <span style={{ color: COLORS.inkSoft }}>Check your email for a sign-in link.</span>
-        ) : (
-          <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <input
-              style={{ ...styles.input, width: "auto", fontSize: 13, padding: "6px 10px" }}
-              placeholder="you@example.com"
-              value={authEmail}
-              onChange={(e) => setAuthEmail(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && onSendMagicLink()}
-            />
-            <button style={{ ...styles.buttonGhost, padding: "6px 12px", fontSize: 13 }} onClick={onSendMagicLink} disabled={authState === "sending"}>
-              {authState === "sending" ? "Sending…" : "Send link"}
-            </button>
-            <span onClick={() => setAuthPromptOpen(false)} style={{ cursor: "pointer", color: COLORS.inkSoft, fontSize: 12 }}>Cancel</span>
-            {authState === "error" && <span style={{ color: COLORS.danger, fontSize: 12 }}>{authError || "Enter a valid email."}</span>}
-            {authState !== "error" && <span style={{ color: COLORS.inkSoft, fontSize: 11 }}>Already have one? Same box signs you back in.</span>}
-          </span>
         )}
       </div>
+
+      {authPromptOpen && !currentUser && (
+        <div style={styles.modalOverlay} onClick={closeModal}>
+          <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+              <h2 style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: 20, margin: 0 }}>
+                {authMode === "reset" ? "Reset your password" : "Create a free account"}
+              </h2>
+              <span onClick={closeModal} style={{ cursor: "pointer", color: COLORS.inkSoft, fontSize: 20, lineHeight: 1 }}>×</span>
+            </div>
+            <p style={{ fontSize: 13, color: COLORS.inkSoft, margin: "0 0 20px" }}>
+              {authMode === "reset"
+                ? "We'll email you a link to set a new one."
+                : "Save your plans and skip re-entering your info next time."}
+            </p>
+
+            {authState === "sent" ? (
+              <p style={{ fontSize: 14, color: COLORS.ink }}>
+                {authMode === "reset" ? "Check your email for a reset link." : "Check your email to finish — the link/confirmation is on its way."}
+              </p>
+            ) : (
+              <Fragment>
+                <div style={{ marginBottom: 14 }}>
+                  <label style={styles.label}>Email</label>
+                  <input
+                    style={styles.input}
+                    type="email"
+                    autoComplete="email"
+                    inputMode="email"
+                    placeholder="you@example.com"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    onKeyDown={submitOnEnter}
+                  />
+                </div>
+
+                {authMode !== "reset" && authMode !== "link" && (
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={styles.label}>Password</label>
+                    <input
+                      style={styles.input}
+                      type="password"
+                      autoComplete="current-password"
+                      placeholder="At least 8 characters"
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      onKeyDown={submitOnEnter}
+                    />
+                  </div>
+                )}
+
+                {authState === "error" && <p style={styles.errorText}>{authError}</p>}
+
+                {authMode === "password" && (
+                  <Fragment>
+                    <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
+                      <button style={{ ...styles.button, flex: 1 }} onClick={onPasswordSignIn} disabled={authState === "sending"}>
+                        {authState === "sending" ? "Signing in…" : "Sign in"}
+                      </button>
+                      <button style={{ ...styles.buttonGhost, flex: 1 }} onClick={onPasswordSignUp} disabled={authState === "sending"}>
+                        Create account
+                      </button>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 14 }}>
+                      <span onClick={() => switchMode("link")} style={{ fontSize: 12, color: COLORS.brassDeep, cursor: "pointer" }}>Email me a link instead</span>
+                      <span onClick={() => switchMode("reset")} style={{ fontSize: 12, color: COLORS.inkSoft, cursor: "pointer" }}>Forgot password?</span>
+                    </div>
+                  </Fragment>
+                )}
+
+                {authMode === "link" && (
+                  <Fragment>
+                    <button style={{ ...styles.button, width: "100%" }} onClick={onSendMagicLink} disabled={authState === "sending"}>
+                      {authState === "sending" ? "Sending…" : "Send sign-in link"}
+                    </button>
+                    <div style={{ marginTop: 14 }}>
+                      <span onClick={() => switchMode("password")} style={{ fontSize: 12, color: COLORS.brassDeep, cursor: "pointer" }}>Use a password instead</span>
+                    </div>
+                  </Fragment>
+                )}
+
+                {authMode === "reset" && (
+                  <Fragment>
+                    <button style={{ ...styles.button, width: "100%" }} onClick={onPasswordReset} disabled={authState === "sending"}>
+                      {authState === "sending" ? "Sending…" : "Send reset link"}
+                    </button>
+                    <div style={{ marginTop: 14 }}>
+                      <span onClick={() => switchMode("password")} style={{ fontSize: 12, color: COLORS.brassDeep, cursor: "pointer" }}>Back to sign in</span>
+                    </div>
+                  </Fragment>
+                )}
+              </Fragment>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1396,6 +1706,12 @@ function ScheduleGrid({ dates, slots, eventTz, displayTz, mode, editable, select
 
   function handleTouchStart(e) {
     if (!cellEditableGrid) return;
+    // Without this, iOS Safari still fires a synthetic "ghost click" ~300ms
+    // after the finger lifts, targeted at whatever cell is under the finger
+    // at lift-off (which can drift slightly during a tap) rather than where
+    // the touch started — that's what was re-toggling the wrong cell on a
+    // plain tap. Suppressing the default here stops iOS from synthesizing it.
+    e.preventDefault();
     const key = keyFromTouch(e.touches[0]);
     if (key) onCellDown(key);
   }
