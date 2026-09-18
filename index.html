@@ -590,24 +590,49 @@ function CommonhourApp() {
 
   // Native date inputs only open their picker when you hit the tiny
   // calendar icon in most desktop browsers, so this makes the whole box
-  // clickable. But on mobile, tapping ANY part of a date input already
-  // opens the OS picker by default — there's no separate icon there.
-  // Calling showPicker() again on top of that default behavior was
-  // triggering it twice in a row, and the reflexive re-open appears to be
-  // what was committing "today" as a phantom entry before the real pick
-  // registered. Skipping the explicit call on coarse-pointer (touch)
-  // devices avoids that double-open; desktop still gets the fix, since
-  // that's the only place it was actually needed.
+  // clickable. On mobile this is a no-op in practice (tapping any part of
+  // the input already opens the OS picker by default), but it's harmless
+  // to leave in for desktop where it's the only place it's needed.
   function openDatePicker() {
     const el = dateInputRef.current;
     if (!el) return;
-    const isTouchPrimary = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
-    if (isTouchPrimary) return;
     if (typeof el.showPicker === "function") {
       try { el.showPicker(); return; } catch (e) {}
     }
     el.focus();
   }
+
+  // The real fix for "today gets added along with my actual pick": iOS's
+  // date-wheel picker starts pre-loaded at today's date and fires a change
+  // event on every scroll tick, not just once at the end — so listening to
+  // React's onChange (which fires on every one of those ticks) adds each
+  // intermediate value, today included, as its own entry. The native
+  // "change" event only fires once when the picker is actually dismissed
+  // with a final value, so that's what needs to drive the add — not
+  // onChange.
+  //
+  // This has to be a callback ref, not a useEffect: the date input only
+  // exists in the DOM while the "create plan" page is showing, so an
+  // effect tied to unrelated state (as an earlier attempt here used) can
+  // miss the moment it actually mounts. A callback ref fires exactly when
+  // the element appears or disappears, regardless of why.
+  //
+  // latestAddDate keeps the listener (attached once, at mount) calling the
+  // CURRENT addDate/formDates closure rather than whatever was current the
+  // one time the listener was attached — otherwise it'd keep checking
+  // against a stale, empty formDates forever.
+  const latestAddDate = useRef(null);
+  latestAddDate.current = (value) => addDate(value);
+  const dateChangeHandler = useRef((e) => { if (latestAddDate.current) latestAddDate.current(e.target.value); });
+  const setDateInputEl = useCallback((el) => {
+    if (dateInputRef.current) {
+      dateInputRef.current.removeEventListener("change", dateChangeHandler.current);
+    }
+    dateInputRef.current = el;
+    if (el) {
+      el.addEventListener("change", dateChangeHandler.current);
+    }
+  }, []);
 
   const [startMin, setStartMin] = useState(9 * 60);
   const [endMin, setEndMin] = useState(18 * 60);
@@ -1196,11 +1221,11 @@ function CommonhourApp() {
               <label style={styles.label}>Dates</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                 <input
-                  ref={dateInputRef}
+                  ref={setDateInputEl}
                   type="date"
                   style={{ ...styles.input, cursor: "pointer" }}
                   value={dateInput}
-                  onChange={(e) => addDate(e.target.value)}
+                  onChange={(e) => setDateInput(e.target.value)}
                   onClick={openDatePicker}
                 />
               </div>
