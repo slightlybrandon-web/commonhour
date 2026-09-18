@@ -601,6 +601,25 @@ function CommonhourApp() {
     }
     el.focus();
   }
+
+  // React's onChange for a date input is really bound to the native
+  // "input" event, which can fire more than once during a single pick —
+  // notably, iOS's wheel-style date picker defaults to today whenever the
+  // field is empty, and can emit an intermediate "input" event with that
+  // default before the person finishes scrolling to their intended date.
+  // Wiring addDate() straight to onChange meant that default (today) could
+  // get added as its own entry alongside the date actually chosen. The
+  // native "change" event, by contrast, only fires once the value is truly
+  // committed (the picker closes on a value) — attaching to that directly,
+  // outside React's synthetic system, is what actually fixes it.
+  useEffect(() => {
+    const el = dateInputRef.current;
+    if (!el) return undefined;
+    function onNativeChange(e) { addDate(e.target.value); }
+    el.addEventListener("change", onNativeChange);
+    return () => el.removeEventListener("change", onNativeChange);
+  }, [formDates]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const [startMin, setStartMin] = useState(9 * 60);
   const [endMin, setEndMin] = useState(18 * 60);
   const [formDuration, setFormDuration] = useState(60);
@@ -1192,7 +1211,7 @@ function CommonhourApp() {
                   type="date"
                   style={{ ...styles.input, cursor: "pointer" }}
                   value={dateInput}
-                  onChange={(e) => addDate(e.target.value)}
+                  onChange={(e) => setDateInput(e.target.value)}
                   onClick={openDatePicker}
                 />
               </div>
@@ -1269,7 +1288,7 @@ function CommonhourApp() {
   if (page === "event" && eventDoc) {
     const locationIsUrl = /^https?:\/\//i.test(eventDoc.location || "");
     return (
-      <div style={styles.root} onMouseUp={endDrag} onTouchEnd={endDrag}>
+      <div style={styles.root} onPointerUp={endDrag} onPointerCancel={endDrag}>
         <div style={styles.shell}>
           <AuthHeader {...authHeaderProps} />
 
@@ -1762,40 +1781,10 @@ function ScheduleGrid({ dates, slots, eventTz, displayTz, mode, editable, select
   const rowLabels = computeRowLabels(dates, slots, eventTz, displayTz);
   const cellEditableGrid = editable && !locked;
 
-  // Touch devices don't fire mouseenter across elements during a drag, so
-  // dragging to select multiple cells needs its own handling: find whatever
-  // cell is physically under the finger on each move, using elementFromPoint
-  // plus a data-key attribute on each cell to identify it.
-  function keyFromTouch(touch) {
-    const el = document.elementFromPoint(touch.clientX, touch.clientY);
-    return el && el.dataset ? el.dataset.key : null;
-  }
-
-  function handleTouchStart(e) {
-    if (!cellEditableGrid) return;
-    // Without this, iOS Safari still fires a synthetic "ghost click" ~300ms
-    // after the finger lifts, targeted at whatever cell is under the finger
-    // at lift-off (which can drift slightly during a tap) rather than where
-    // the touch started — that's what was re-toggling the wrong cell on a
-    // plain tap. Suppressing the default here stops iOS from synthesizing it.
-    e.preventDefault();
-    const key = keyFromTouch(e.touches[0]);
-    if (key) onCellDown(key);
-  }
-
-  function handleTouchMove(e) {
-    if (!cellEditableGrid) return;
-    e.preventDefault();
-    const key = keyFromTouch(e.touches[0]);
-    if (key) onCellEnter(key);
-  }
-
   return (
     <div style={{ position: "relative" }}>
       <div style={{ overflowX: "auto", paddingBottom: 8, opacity: locked ? 0.45 : 1, transition: "opacity 120ms" }}>
         <div
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
           style={{ display: "grid", gridTemplateColumns: `${timeColW}px repeat(${dates.length}, ${dateColW}px)`, userSelect: "none", minWidth: timeColW + dates.length * dateColW }}
         >
           <div style={{ height: 40 }} />
@@ -1839,9 +1828,22 @@ function ScheduleGrid({ dates, slots, eventTz, displayTz, mode, editable, select
                   return (
                     <div key={key}
                       data-key={key}
-                      onMouseDown={() => cellEditable && onCellDown(key)}
+                      // Pointer Events (not separate mouse/touch handlers) —
+                      // this is what actually fixes the tap-then-untouch bug.
+                      // The old setup had both a mouse handler on every cell
+                      // AND a separate touch listener on the grid, so a
+                      // single tap could fire onCellDown twice (once via
+                      // each path), toggling the cell on and then right back
+                      // off. Pointer Events fire exactly once per input,
+                      // whether it's a finger or a mouse, so there's nothing
+                      // left to double-fire.
+                      onPointerDown={(e) => {
+                        if (!cellEditable) return;
+                        if (e.pointerType === "touch") e.preventDefault();
+                        onCellDown(key);
+                      }}
                       onClick={() => mode === "group" && onCellClick && onCellClick(d, m)}
-                      onMouseEnter={() => {
+                      onPointerEnter={() => {
                         if (cellEditable) onCellEnter(key);
                         if (mode === "group") {
                           const people = countAt(key);
@@ -1849,7 +1851,7 @@ function ScheduleGrid({ dates, slots, eventTz, displayTz, mode, editable, select
                           setHoverInfo(people.length || absent.length ? { key, people, absent } : null);
                         }
                       }}
-                      onMouseLeave={() => { if (mode === "group") setHoverInfo(null); }}
+                      onPointerLeave={() => { if (mode === "group") setHoverInfo(null); }}
                       style={{ height: cellH, background: bg, borderLeft: `1px solid ${COLORS.lineSoft}`, borderTop: isHourStart ? `1px solid ${COLORS.line}` : `1px solid ${COLORS.lineSoft}`, outline: isChosen ? `2px solid ${COLORS.brassDeep}` : "none", outlineOffset: isChosen ? "-2px" : "0", cursor: cellEditable || mode === "group" ? "pointer" : "default", touchAction: cellEditable ? "none" : "auto", boxSizing: "border-box" }}
                       title={title}
                     />
