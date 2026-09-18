@@ -1829,7 +1829,22 @@ function ScheduleGrid({ dates, slots, eventTz, displayTz, mode, editable, select
                       // left to double-fire.
                       onPointerDown={(e) => {
                         if (!cellEditable) return;
-                        if (e.pointerType === "touch") e.preventDefault();
+                        if (e.pointerType === "touch") {
+                          e.preventDefault();
+                          // Touch pointers get *implicit* capture on
+                          // whichever element they first touch — the
+                          // browser then keeps routing every subsequent
+                          // move to that original cell instead of letting
+                          // pointerenter fire on the cells the finger
+                          // actually drags across. That's what was
+                          // breaking drag-to-select specifically (a tap
+                          // never needs a second cell to register, so it
+                          // wasn't affected). Releasing it restores normal
+                          // hit-testing as the finger moves, same as mouse.
+                          if (e.target.hasPointerCapture && e.target.hasPointerCapture(e.pointerId)) {
+                            e.target.releasePointerCapture(e.pointerId);
+                          }
+                        }
                         onCellDown(key);
                       }}
                       onClick={() => mode === "group" && onCellClick && onCellClick(d, m)}
