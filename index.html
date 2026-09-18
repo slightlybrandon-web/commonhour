@@ -602,38 +602,6 @@ function CommonhourApp() {
     el.focus();
   }
 
-  // The real fix for "today gets added along with my actual pick": iOS's
-  // date-wheel picker starts pre-loaded at today's date and fires a change
-  // event on every scroll tick, not just once at the end — so listening to
-  // React's onChange (which fires on every one of those ticks) adds each
-  // intermediate value, today included, as its own entry. The native
-  // "change" event only fires once when the picker is actually dismissed
-  // with a final value, so that's what needs to drive the add — not
-  // onChange.
-  //
-  // This has to be a callback ref, not a useEffect: the date input only
-  // exists in the DOM while the "create plan" page is showing, so an
-  // effect tied to unrelated state (as an earlier attempt here used) can
-  // miss the moment it actually mounts. A callback ref fires exactly when
-  // the element appears or disappears, regardless of why.
-  //
-  // latestAddDate keeps the listener (attached once, at mount) calling the
-  // CURRENT addDate/formDates closure rather than whatever was current the
-  // one time the listener was attached — otherwise it'd keep checking
-  // against a stale, empty formDates forever.
-  const latestAddDate = useRef(null);
-  latestAddDate.current = (value) => addDate(value);
-  const dateChangeHandler = useRef((e) => { if (latestAddDate.current) latestAddDate.current(e.target.value); });
-  const setDateInputEl = useCallback((el) => {
-    if (dateInputRef.current) {
-      dateInputRef.current.removeEventListener("change", dateChangeHandler.current);
-    }
-    dateInputRef.current = el;
-    if (el) {
-      el.addEventListener("change", dateChangeHandler.current);
-    }
-  }, []);
-
   const [startMin, setStartMin] = useState(9 * 60);
   const [endMin, setEndMin] = useState(18 * 60);
   const [formDuration, setFormDuration] = useState(60);
@@ -1221,15 +1189,23 @@ function CommonhourApp() {
               <label style={styles.label}>Dates</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                 <input
-                  ref={setDateInputEl}
+                  ref={dateInputRef}
                   type="date"
-                  style={{ ...styles.input, cursor: "pointer" }}
+                  style={styles.input}
                   value={dateInput}
                   onChange={(e) => setDateInput(e.target.value)}
                   onClick={openDatePicker}
                 />
+                <button
+                  type="button"
+                  style={{ ...styles.buttonGhost, flexShrink: 0 }}
+                  onClick={() => addDate()}
+                  disabled={!dateInput}
+                >
+                  Add
+                </button>
               </div>
-              <p style={styles.hint}>Add every date that could work — people will mark which ones they're actually free.</p>
+              <p style={styles.hint}>Pick a date, then tap Add — add every date that could work, people will mark which ones they're actually free.</p>
               <div style={{ marginTop: 8 }}>
                 {formDates.map((d) => {
                   const { wd, md } = dateLabel(d);
