@@ -589,36 +589,25 @@ function CommonhourApp() {
   const dateInputRef = useRef(null);
 
   // Native date inputs only open their picker when you hit the tiny
-  // calendar icon in most desktop browsers. This makes the whole box
-  // clickable instead. showPicker() isn't universally supported (older
-  // Safari in particular), so it falls back to a plain focus, which still
-  // opens the picker on most mobile browsers by default.
+  // calendar icon in most desktop browsers, so this makes the whole box
+  // clickable. But on mobile, tapping ANY part of a date input already
+  // opens the OS picker by default — there's no separate icon there.
+  // Calling showPicker() again on top of that default behavior was
+  // triggering it twice in a row, and the reflexive re-open appears to be
+  // what was committing "today" as a phantom entry before the real pick
+  // registered. Skipping the explicit call on coarse-pointer (touch)
+  // devices avoids that double-open; desktop still gets the fix, since
+  // that's the only place it was actually needed.
   function openDatePicker() {
     const el = dateInputRef.current;
     if (!el) return;
+    const isTouchPrimary = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+    if (isTouchPrimary) return;
     if (typeof el.showPicker === "function") {
       try { el.showPicker(); return; } catch (e) {}
     }
     el.focus();
   }
-
-  // React's onChange for a date input is really bound to the native
-  // "input" event, which can fire more than once during a single pick —
-  // notably, iOS's wheel-style date picker defaults to today whenever the
-  // field is empty, and can emit an intermediate "input" event with that
-  // default before the person finishes scrolling to their intended date.
-  // Wiring addDate() straight to onChange meant that default (today) could
-  // get added as its own entry alongside the date actually chosen. The
-  // native "change" event, by contrast, only fires once the value is truly
-  // committed (the picker closes on a value) — attaching to that directly,
-  // outside React's synthetic system, is what actually fixes it.
-  useEffect(() => {
-    const el = dateInputRef.current;
-    if (!el) return undefined;
-    function onNativeChange(e) { addDate(e.target.value); }
-    el.addEventListener("change", onNativeChange);
-    return () => el.removeEventListener("change", onNativeChange);
-  }, [formDates]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [startMin, setStartMin] = useState(9 * 60);
   const [endMin, setEndMin] = useState(18 * 60);
@@ -1211,7 +1200,7 @@ function CommonhourApp() {
                   type="date"
                   style={{ ...styles.input, cursor: "pointer" }}
                   value={dateInput}
-                  onChange={(e) => setDateInput(e.target.value)}
+                  onChange={(e) => addDate(e.target.value)}
                   onClick={openDatePicker}
                 />
               </div>
