@@ -21,11 +21,25 @@
 <script>
   window.SUPABASE_URL = "https://egolqarcnfceemtqfeut.supabase.co";
   window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVnb2xxYXJjbmZjZWVtdHFmZXV0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxOTE4NTUsImV4cCI6MjEwNDc2Nzg1NX0.t9rrxlQGbq5xSIFVc2p2Pl6UioAxGKCfLDIegQK6Zvs";
+</script>
 
-  // Create a Stripe Payment Link (Stripe Dashboard > Payment Links, no code
-  // needed) for a flexible one-time "support us" amount, and paste the URL
-  // here. Leave as-is to hide the donate button until it's set.
-  window.DONATE_URL = "";
+<!-- ============================================================
+     ADS: define commonhourEnableAds() to actually inject the
+     AdSense script tag once the site is approved and you have a
+     publisher ID. Left as a no-op stub until then — the cookie
+     consent banner near the bottom of this file calls this on
+     "Accept", so wiring in the real AdSense snippet here is the
+     only step needed to turn ads on later.
+     ============================================================ -->
+<script>
+  window.commonhourEnableAds = function () {
+    // TODO: once approved, inject the AdSense script here, e.g.:
+    // var s = document.createElement("script");
+    // s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXXXX";
+    // s.async = true;
+    // s.crossOrigin = "anonymous";
+    // document.head.appendChild(s);
+  };
 </script>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
@@ -1752,16 +1766,17 @@ function AuthHeader({
 
 function DonateAffiliateStrip({ isPaid }) {
   if (isPaid) return null;
+  // Placeholder while AdSense review/approval is pending. Once approved
+  // and window.commonhourEnableAds() is wired to the real AdSense script,
+  // replace this span with the actual ad unit.
   return (
-    <div style={{ marginTop: 32, paddingTop: 16, borderTop: `1px solid ${COLORS.line}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+    <div style={{ marginTop: 32, paddingTop: 16, borderTop: `1px solid ${COLORS.line}`, display: "flex", justifyContent: "center", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
       <span style={{ fontSize: 12, color: COLORS.inkSoft }}>
-        Sponsored{/* Replace this slot with real affiliate content once a partner is set up. */}
-      </span>
-      {window.DONATE_URL ? (
-        <a href={window.DONATE_URL} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: COLORS.brassDeep, fontWeight: 600, textDecoration: "none" }}>
-          Support Commonhour — no perks, just keeps it free
+        Now accepting sponsorships —{" "}
+        <a href="mailto:hello@commonhour.io?subject=Sponsorship%20inquiry" style={{ color: COLORS.brassDeep, fontWeight: 600, textDecoration: "none" }}>
+          get in touch
         </a>
-      ) : null}
+      </span>
     </div>
   );
 }
@@ -1879,6 +1894,159 @@ function ScheduleGrid({ dates, slots, eventTz, displayTz, mode, editable, select
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<CommonhourApp />);
+</script>
+<!-- ============================================================
+     COOKIE CONSENT BANNER
+     Shown on first visit, before any ad cookies are set. "Accept"
+     calls window.commonhourEnableAds() (stub defined near the top
+     of this file — wire in the real AdSense script there once
+     approved). "Decline" skips ad personalization; the rest of the
+     site (sign-in, admin status) isn't gated by this, since those
+     are essential cookies.
+     ============================================================ -->
+<style>
+  #ch-cookie-banner {
+    position: fixed;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    z-index: 9999;
+    width: calc(100% - 32px);
+    max-width: 560px;
+    background: #FFFFFF;
+    border: 1px solid #E3E8E6;
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+    padding: 20px 22px;
+    font-family: 'Inter', -apple-system, sans-serif;
+    color: #1C201F;
+    display: none;
+  }
+  #ch-cookie-banner.ch-visible {
+    display: block;
+  }
+  #ch-cookie-banner p {
+    margin: 0 0 14px;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  #ch-cookie-banner a {
+    color: #0B7C60;
+    text-decoration: underline;
+  }
+  #ch-cookie-banner .ch-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+  #ch-cookie-banner button {
+    font-family: 'Manrope', -apple-system, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  #ch-cookie-banner .ch-decline {
+    background: transparent;
+    color: #1C201F;
+    border-color: #E3E8E6;
+  }
+  #ch-cookie-banner .ch-accept {
+    background: #0B7C60;
+    color: #FFFFFF;
+  }
+  @media (max-width: 480px) {
+    #ch-cookie-banner {
+      bottom: 0;
+      border-radius: 12px 12px 0 0;
+    }
+  }
+</style>
+
+<div id="ch-cookie-banner" role="dialog" aria-live="polite" aria-label="Cookie consent">
+  <p>
+    We use cookies to keep you signed in and remember your admin status on
+    plans you organize. With your consent, we'll also show ads via Google
+    AdSense, which may use cookies to personalize them. See our
+    <a href="/privacy.html" target="_blank" rel="noopener">Privacy Policy</a>.
+  </p>
+  <div class="ch-actions">
+    <button class="ch-decline" type="button">Decline</button>
+    <button class="ch-accept" type="button">Accept</button>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var STORAGE_KEY = 'ch_cookie_consent'; // 'accepted' | 'declined'
+
+    function getConsent() {
+      try {
+        return localStorage.getItem(STORAGE_KEY);
+      } catch (e) {
+        return null; // localStorage unavailable (e.g. private mode edge cases)
+      }
+    }
+
+    function setConsent(value) {
+      try {
+        localStorage.setItem(STORAGE_KEY, value);
+      } catch (e) {
+        // If storage fails, the banner will just reappear next visit.
+        // Not ideal, but never blocks the rest of the site.
+      }
+    }
+
+    function showBanner() {
+      var el = document.getElementById('ch-cookie-banner');
+      if (el) el.classList.add('ch-visible');
+    }
+
+    function hideBanner() {
+      var el = document.getElementById('ch-cookie-banner');
+      if (el) el.classList.remove('ch-visible');
+    }
+
+    // Call this on page load to check for a prior decision.
+    window.commonhourInitConsent = function () {
+      var consent = getConsent();
+      if (consent === 'accepted') {
+        if (typeof window.commonhourEnableAds === 'function') {
+          window.commonhourEnableAds();
+        }
+      } else if (consent === 'declined') {
+        // Nothing to do — ads stay off.
+      } else {
+        showBanner();
+      }
+    };
+
+    document.addEventListener('DOMContentLoaded', function () {
+      var acceptBtn = document.querySelector('#ch-cookie-banner .ch-accept');
+      var declineBtn = document.querySelector('#ch-cookie-banner .ch-decline');
+
+      if (acceptBtn) {
+        acceptBtn.addEventListener('click', function () {
+          setConsent('accepted');
+          hideBanner();
+          if (typeof window.commonhourEnableAds === 'function') {
+            window.commonhourEnableAds();
+          }
+        });
+      }
+
+      if (declineBtn) {
+        declineBtn.addEventListener('click', function () {
+          setConsent('declined');
+          hideBanner();
+        });
+      }
+
+      window.commonhourInitConsent();
+    });
+  })();
 </script>
 </body>
 </html>
