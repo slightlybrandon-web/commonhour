@@ -1,20 +1,24 @@
-# Commonhour — setup and deployment (fresh project)
+# Commonhour
 
-Single-file site (`index.html`), backed by its own dedicated Supabase
-project — separate from TimeBlocked or any other app you've built.
+A group scheduling app: people mark their availability on a shared grid
+with no account required, and the plan's organizer picks a final time and
+generates a calendar invite (Google Calendar, Outlook, or `.ics`) with
+attendees pre-filled.
 
-## 1. Create a new Supabase project
+Live at **commonhour.io**. Single-file site (`index.html`) — React +
+Babel loaded from CDN, no build step — backed by Supabase (Postgres, Row
+Level Security, Auth) and Resend for transactional email.
 
-1. Go to https://supabase.com/dashboard and click **New project**.
-2. Give it its own name (e.g. "commonhour"), pick a region, wait ~1 minute
-   for it to provision.
-3. This is a completely separate database from any other project — nothing
-   here can affect TimeBlocked or vice versa.
+## Setting up a fresh instance
 
-## 2. Run this SQL (SQL Editor → paste the whole block → Run)
+### 1. Create a Supabase project
 
-This is the complete, current schema in one script — no need to run
-anything else afterward.
+Go to https://supabase.com/dashboard → **New project**, name it, pick a
+region, and wait for it to provision.
+
+### 2. Run this SQL (SQL Editor → paste the whole block → Run)
+
+This is the complete, current schema in one script.
 
 ```sql
 create table events (
@@ -24,12 +28,17 @@ create table events (
   start_hour int not null,
   end_hour int not null,
   slot_min int not null,
+  default_duration int,
   timezone text not null default 'UTC',
   location text,
   organizer_name text,
   organizer_email text,
   user_id uuid references auth.users(id),
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  booked_date date,
+  booked_minutes int,
+  booked_duration int,
+  booked_at timestamptz
 );
 
 create table availability (
@@ -49,7 +58,7 @@ alter table availability enable row level security;
 
 -- Anyone can create a plan or submit a response (no accounts required for
 -- the free/no-account tier). Reads are NOT open on the raw tables — the
--- anonymous share-link flow reads through the two functions below, and
+-- anonymous share-link flow reads through the functions below, and
 -- signed-in users get their own scoped policies.
 create policy "insert events" on events for insert with check (true);
 create policy "insert availability" on availability for insert with check (true);
@@ -76,14 +85,15 @@ create policy "authenticated read own responses" on availability
 create function get_plan(p_id text)
 returns table(
   id text, name text, dates jsonb, start_hour int, end_hour int, slot_min int,
-  timezone text, location text, organizer_name text, user_id uuid, created_at timestamptz
+  default_duration int, timezone text, location text, organizer_name text,
+  user_id uuid, created_at timestamptz
 )
 language sql
 security definer
 set search_path = public
 as $$
-  select id, name, dates, start_hour, end_hour, slot_min, timezone, location,
-         organizer_name, user_id, created_at
+  select id, name, dates, start_hour, end_hour, slot_min, default_duration,
+         timezone, location, organizer_name, user_id, created_at
   from events where id = p_id;
 $$;
 grant execute on function get_plan(text) to anon, authenticated;
@@ -147,18 +157,110 @@ begin
 end;
 $$;
 grant execute on function save_availability(text, text, text, jsonb) to anon, authenticated;
+
+-- Admin-only: persist the organizer's final chosen time. Called the
+-- moment they click Google Calendar / Outlook / .ics, not just when they
+-- open the plan. Requires a real signed-in session — either the account
+-- owns the plan, or the signed-in user's email matches the organizer's.
+create function book_plan(
+  p_id text, p_date date, p_minutes int, p_duration int
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_event events%rowtype;
+  v_caller_email text;
+begin
+  select * into v_event from events where id = p_id;
+  if v_event.id is null then
+    raise exception 'PLAN_NOT_FOUND';
+  end if;
+
+  v_caller_email := auth.jwt() ->> 'email';
+
+  if auth.uid() is null then
+    raise exception 'NOT_AUTHORIZED';
+  end if;
+
+  if auth.uid() = v_event.user_id
+     or (v_event.organizer_email is not null and lower(v_caller_email) = lower(v_event.organizer_email)) then
+    update events
+      set booked_date = p_date,
+          booked_minutes = p_minutes,
+          booked_duration = p_duration,
+          booked_at = now()
+      where id = p_id;
+    return;
+  end if;
+
+  raise exception 'NOT_AUTHORIZED';
+end;
+$$;
+grant execute on function book_plan(text, date, int, int) to authenticated;
+
+-- Delete a plan. Restricted to `authenticated` only (anon cannot call
+-- this at all) — deleting is permanent, so it requires actually being
+-- signed in as either the account owner or the organizer's verified
+-- email, not just knowing/typing that email into a box.
+create function delete_plan(p_id text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_event events%rowtype;
+  v_caller_email text;
+begin
+  select * into v_event from events where id = p_id;
+  if v_event.id is null then
+    raise exception 'PLAN_NOT_FOUND';
+  end if;
+
+  v_caller_email := auth.jwt() ->> 'email';
+
+  if auth.uid() = v_event.user_id
+     or (v_event.organizer_email is not null and lower(v_caller_email) = lower(v_event.organizer_email)) then
+    delete from events where id = p_id;
+    return;
+  end if;
+
+  raise exception 'NOT_AUTHORIZED';
+end;
+$$;
+grant execute on function delete_plan(text) to authenticated;
+
+-- Daily cleanup. Booked plans expire 10 days after the booked date;
+-- never-booked plans expire 30 days after the last candidate date, so
+-- abandoned polls don't live forever.
+create function cleanup_expired_plans()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  delete from events
+  where booked_date is not null
+    and booked_date + interval '10 days' < now();
+
+  delete from events
+  where booked_date is null
+    and (
+      select max((d)::date) from jsonb_array_elements_text(dates) as d
+    ) + interval '30 days' < now();
+end;
+$$;
 ```
 
-## 2b. Run migration 002 (delete, booking, auto-expiry)
+### 3. Enable pg_cron and schedule the daily cleanup
 
-Run `migration_002_delete_and_expiry.sql` next, in the same SQL Editor —
-it adds the `book_plan` / `delete_plan` functions, the columns that track
-a plan's booked date, and the `cleanup_expired_plans` function.
-
-**Then, as a separate manual step** (not paste-and-run SQL): go to
-**Database → Extensions** in the dashboard and enable `pg_cron` (and
-`pg_net` if it's not already on). Once enabled, run this once in the SQL
-Editor to schedule the daily cleanup:
+In the dashboard: **Database → Extensions**, enable `pg_cron` (and
+`pg_net` if it's listed separately and not already on). Then, in the SQL
+Editor, run once:
 
 ```sql
 select cron.schedule(
@@ -168,28 +270,31 @@ select cron.schedule(
 );
 ```
 
-Without this step, plans will never auto-expire — the `delete_plan` and
-`book_plan` functions work immediately either way, only the scheduled
-cleanup needs the extension.
+To check it's running: `select * from cron.job;`
+To check run history: `select * from cron.job_run_details order by start_time desc limit 10;`
 
-## 3. Enable sign-in (magic link, OTP, and password)
+### 4. Enable sign-in (password and magic link)
 
-In your new project: **Authentication → Providers → Email** — confirm
-Email is enabled (it is by default). This one toggle covers all three
-sign-in methods the app offers (magic link, OTP code, and password) — no
-separate provider setup needed. Then **Authentication → URL
-Configuration**:
+**Authentication → Providers → Email** — confirm Email is enabled (it is
+by default). This one toggle covers both sign-in methods the app offers.
+Then **Authentication → URL Configuration**:
 
-- **Site URL**: your Commonhour Netlify URL (once you have one — see below)
+- **Site URL**: your deployed URL
 - **Redirect URLs**: the same URL
 
-You can come back and set these once you know the deployed URL — the app
-works before this is set, but magic-link and password-reset emails won't
-redirect correctly until it is.
+Both magic-link and password-reset emails need this set correctly to
+redirect back into the app rather than failing silently.
 
-## 4. Configure the site
+### 5. Set up transactional email (Resend)
 
-Open `index.html`, find these two lines near the top, and paste in your new
+Supabase's default email sender has a low rate limit, unsuitable for real
+traffic. To use Resend instead: verify a sending domain in Resend,
+generate SMTP credentials, and add them under **Authentication → SMTP
+Settings** in the Supabase dashboard.
+
+### 6. Configure the site
+
+Open `index.html`, find these lines near the top, and paste in your
 project's URL and anon/publishable key (Project Settings → API Keys):
 
 ```html
@@ -199,50 +304,57 @@ project's URL and anon/publishable key (Project Settings → API Keys):
 </script>
 ```
 
-## 5. Deploy
+### 7. Deploy
 
-Create a **new** Netlify site for this (don't reuse your TimeBlocked site) —
-drag this folder onto https://app.netlify.com/drop, or connect a fresh
-GitHub repo. Once you have the resulting URL, go back to step 3 and set it
-as the Site URL / Redirect URL in Supabase.
+Connect the repo to Netlify (or any static host). With Netlify connected
+to GitHub, every push to `main` deploys automatically — no separate
+deploy step. Once you have a live URL, go back to step 4 and set it as
+the Site URL / Redirect URL in Supabase.
 
 ## Still placeholders — wire these up when ready
 
 - `window.DONATE_URL` near the top of `index.html` — create a Stripe
   Payment Link (Stripe Dashboard → Payment Links, no code) for a flexible
-  one-time amount, and paste the URL in. The donate button is hidden until
-  this is set.
+  one-time amount, and paste the URL in. The donate button stays hidden
+  until this is set.
 - The "Sponsored" text inside the `DonateAffiliateStrip` component in
-  `index.html` — replace with real affiliate content once a partner is in
-  place.
-- Both the donate button and the affiliate slot are wired to disappear once
-  a `isPaid` flag is true — that's hardcoded `false` everywhere for now,
-  since the actual paid tier (Stripe subscriptions) isn't built yet.
+  `index.html` — reserved for a Google AdSense slot, currently in
+  progress; requires a published privacy policy before Google will
+  approve it.
+- Both the donate button and the sponsored slot are wired to disappear
+  once an `isPaid` flag is true — that's hardcoded `false` everywhere for
+  now, since the paid tier doesn't exist yet.
 
-## What's built vs. what's next
+## What's built
 
-**Built:** anonymous quick polls (12-response cap), free accounts via magic
-link, OTP, or password (unlimited responses, permanent "My Plans" history,
-automatic admin recognition on your own plans), delete a plan (account
-owners can delete directly; anonymous organizers must sign in as the
-confirmed organizer email first — deletion always requires a real session,
-never just the locally-remembered admin flag), timezone-aware scheduling,
-location field, calendar invite creation (Google Calendar, Outlook, .ics)
-— available to every tier, always — and auto-expiry (10 days after a
-booked date, 30 days after the last candidate date if never booked).
+Anonymous quick polls (12-response cap); free accounts via password or
+magic link with account-owned plans unlimited; permanent "My Plans"
+history; delete a plan (account owners directly, anonymous organizers
+after signing in); automatic admin recognition on your own plans;
+timezone-aware scheduling with a touch-and-mouse-unified drag-to-select
+grid; location field; calendar invite creation (Google Calendar, Outlook,
+`.ics`) available on every tier, always; server-side booking persistence;
+and automatic expiry (10 days after a booked date, 30 days after the last
+candidate date if never booked).
 
-**Not yet built:** paid subscriptions (Stripe checkout + webhooks + feature
-gating), sponsored/ad slot (Google AdSense) and its required privacy
-policy page, calendar auto-fill (Google/Outlook OAuth), required/optional
-attendees, deadlines + auto-nudges, time+location joint polling. Each of
-these is a real, separate project.
+## What's next
+
+1. **Google AdSense** — in progress. Needs the ad slot wired in and a
+   published privacy policy (drafted, not yet live) before Google will
+   approve it.
+2. **A paid tier** — not started. Scope and requirements to be provided
+   separately before work begins.
+3. Longer-term, unscheduled: calendar auto-fill via Google/Outlook OAuth,
+   required/optional attendees, deadlines and auto-nudges, joint
+   time-and-location polling, and real cold user testing with people
+   outside the builder.
 
 ## Known limitations (by design, for now)
 
-- Anyone with a plan's code can still read and respond to it (no accounts
-  required) — same trust model as When2Meet or Doodle.
+- Anyone with a plan's code can read and respond to it — no account
+  required to participate. Intentional: requiring accounts for every
+  respondent would undermine the low-friction pitch of the product.
 - An anonymous organizer who never actually signs in (just types a
   matching email) can unlock booking/viewing on their own plan, but
-  **cannot** delete it or get the precise 10-day-post-booking expiry —
-  both require a real session per migration 002. Their plan instead falls
-  back to the 30-day-after-last-date expiry. Signing in resolves this.
+  cannot delete it or get the precise 10-day-post-booking expiry — both
+  require a real session. Signing in resolves this.
